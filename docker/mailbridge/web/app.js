@@ -154,14 +154,73 @@ function render() {
   if (changed('accounts', [state.users, state.settings, state.connection, [...revealed], state.dovecot, syncView()])) renderAccounts();
   if (changed('login', [state.login, state.status])) renderLogin();
   if (changed('settings', [state.settings, state.status, state.dovecot])) renderSettings();
-  if (changed('cert', state.dovecot)) {
-    $('cert-note').textContent = state.dovecot
-      ? 'In Dovecot mode, IMAP is encrypted with the same certificate as this page, and SMTP with bridge\'s own ' +
-        'self-signed certificate, which you can download here. Mail clients will ask you to accept them.'
-      : 'Bridge encrypts IMAP and SMTP with its own self-signed certificate. Mail clients will ask you to accept it; ' +
-        'import the downloaded certificate if your client needs it installed first.';
-  }
+  if (changed('cert', [state.certificate, state.mailCertificate, state.acme, state.dovecot])) renderCertificate();
   if (changed('password', state.canChangePassword)) renderPassword();
+}
+
+function day(t) {
+  return new Date(t).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
+}
+
+function renderCertificate() {
+  const c = state.certificate, acme = state.acme;
+  const names = (c.names || []).filter((n) => !['127.0.0.1', '::1'].includes(n));
+  const kind = {
+    'self-signed': 'Self-signed certificate',
+    own: 'Your own certificate' + (c.issuer ? ', issued by ' + c.issuer : ''),
+    letsencrypt: 'Certificate from ' + (c.issuer || 'Let\'s Encrypt'),
+  }[c.origin] || 'Certificate';
+  const daysLeft = Math.floor((new Date(c.notAfter) - Date.now()) / 86400000);
+
+  const selfSigned = c.origin === 'self-signed';
+  const lines = [
+    h('div', {}, h('strong', {}, kind), selfSigned ? '' : [' for ', names.flatMap((n, i) => [i ? ', ' : '', h('code', {}, n)])].flat(),
+      ', valid until ' + day(c.notAfter) + '.'),
+  ];
+  if (!selfSigned && daysLeft < 14) {
+    lines.push(h('div', { class: 'small error' }, daysLeft < 0 ? 'This certificate has expired.'
+      : 'This certificate expires in ' + daysLeft + (daysLeft === 1 ? ' day.' : ' days.')));
+  }
+
+  if (acme) {
+    const domains = acme.domains.join(', ');
+    const next = new Date(acme.next).getTime() > 0 ? new Date(acme.next).toLocaleString() : '';
+    if (acme.state === 'error') {
+      lines.push(h('div', { class: 'small error' },
+        (c.origin === 'letsencrypt' ? 'Renewing it failed.' : 'Getting a Let\'s Encrypt certificate for ' + domains + ' failed.') +
+        (next ? ' Next attempt: ' + next + '.' : '')));
+      lines.push(h('div', { class: 'sync-msg small' }, acme.message));
+    } else if (c.origin !== 'letsencrypt') {
+      lines.push(h('div', { class: 'small' }, (acme.message || 'Requesting a Let\'s Encrypt certificate.') +
+        ' The self-signed certificate is used until it arrives.'));
+    } else {
+      lines.push(h('div', { class: 'muted small' }, 'Renewed automatically' + (next ? '; next check ' + next : '') + '.'));
+    }
+  }
+
+  const users = [];
+  if (state.webTLS) users.push('this page');
+  if (state.dovecot || state.mailCertificate) users.push('IMAP');
+  if (state.mailCertificate) users.push('SMTP');
+  const list = users.length > 1 ? users.slice(0, -1).join(', ') + ' and ' + users[users.length - 1] : users[0];
+  const who = users.length ? list[0].toUpperCase() + list.slice(1) + (users.length > 1 ? ' present' : ' presents') +
+    ' this certificate. ' : 'This page is served without encryption. ';
+  let note;
+  if (state.mailCertificate && selfSigned) {
+    note = who + 'Browsers and mail clients will ask you to accept it.';
+  } else if (state.mailCertificate) {
+    note = who + 'Mail clients accept it without asking as long as they connect by one of the names above.';
+  } else if (state.dovecot) {
+    note = who + 'SMTP presents bridge\'s own self-signed certificate, which you can download below. Mail clients ' +
+      'will ask you to accept both.';
+  } else {
+    note = who + 'IMAP and SMTP present bridge\'s own self-signed certificate: mail clients will ask you to accept ' +
+      'it, and you can download it below if your client needs it installed first.';
+  }
+  lines.push(h('div', { class: 'muted small' }, note));
+
+  $('certificate').replaceChildren(...lines);
+  $('btn-cert').hidden = state.mailCertificate;
 }
 
 function renderNotices() {

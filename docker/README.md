@@ -72,8 +72,133 @@ and it only works against this container.
 Bridge encrypts both protocols with its own self-signed certificate, issued
 for `127.0.0.1`. Mail clients will show a certificate warning the first time;
 accept it, or download the certificate from **Maintenance** and import it if
-your client wants it installed. If a client cannot do STARTTLS, switch the
-protocol to SSL/TLS under **Settings**.
+your client wants it installed. To get rid of the warnings altogether, give the
+container [a certificate that mail clients trust](#a-certificate-that-mail-clients-and-browsers-trust-optional).
+If a client cannot do STARTTLS, switch the protocol to SSL/TLS under
+**Settings**.
+
+## A certificate that mail clients and browsers trust (optional)
+
+Out of the box the web page and the mail ports use self-signed certificates,
+and every browser and mail client asks you to accept them. With a domain name
+of your own, the container can get a certificate from
+[Let's Encrypt](https://letsencrypt.org/) and keep it renewed. The web page,
+IMAP and SMTP then all present it, and nothing warns any more.
+
+### Let's Encrypt
+
+Let's Encrypt has to see proof that the domain is yours. A server on a home
+LAN cannot be reached from the internet, so the proof is given through DNS:
+the container briefly publishes a record in your domain, using an API token
+from the company that hosts the domain's DNS. No port has to be opened to the
+internet, now or at renewal.
+
+You need:
+
+1. **A domain name you own**, say `example.com`, with its DNS at a provider
+   that has an API. Nearly 200 are supported, among them Cloudflare, Route 53,
+   DigitalOcean, Hetzner, Gandi, OVH, Porkbun, Namecheap, GoDaddy, deSEC and
+   DuckDNS.
+2. **A name for the server in that domain**, say `mail.example.com`, that your
+   devices resolve to the server's LAN address. An ordinary `A` record with the
+   private address (such as `192.168.1.10`) at your DNS provider does it. Some
+   routers refuse answers that point into the LAN ("DNS rebind protection");
+   in that case add the name to the router's or Pi-hole's local DNS instead.
+3. **An API token from the DNS provider**, limited to editing DNS records of
+   that one domain if the provider lets you.
+
+Then tell the container, here for Cloudflare:
+
+```yaml
+    environment:
+      MAILBRIDGE_ACME_DOMAINS: "mail.example.com"
+      MAILBRIDGE_ACME_DNS: "cloudflare"
+      CLOUDFLARE_DNS_API_TOKEN: "your-token"
+```
+
+`MAILBRIDGE_ACME_DNS` is the provider's code, and each provider reads its
+credentials from variables of its own. The work is done by
+[lego](https://go-acme.github.io/lego/), which is included in the image; its
+[list of DNS providers](https://go-acme.github.io/lego/dns/) has the code and
+the variables for every one. A few common ones:
+
+| Provider | `MAILBRIDGE_ACME_DNS` | Credentials |
+|---|---|---|
+| Cloudflare | `cloudflare` | `CLOUDFLARE_DNS_API_TOKEN` (permission *Zone / DNS / Edit* on the zone) |
+| Amazon Route 53 | `route53` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` |
+| DigitalOcean | `digitalocean` | `DO_AUTH_TOKEN` |
+| Hetzner | `hetzner` | `HETZNER_API_TOKEN` |
+| Gandi | `gandiv5` | `GANDIV5_PERSONAL_ACCESS_TOKEN` |
+| Porkbun | `porkbun` | `PORKBUN_API_KEY`, `PORKBUN_SECRET_API_KEY` |
+| Namecheap | `namecheap` | `NAMECHEAP_API_USER`, `NAMECHEAP_API_KEY` |
+| GoDaddy | `godaddy` | `GODADDY_API_KEY`, `GODADDY_API_SECRET` |
+| deSEC | `desec` | `DESEC_TOKEN` |
+| DuckDNS | `duckdns` | `DUCKDNS_TOKEN` |
+
+`docker compose exec mailbridge lego dnshelp -c cloudflare` prints the same
+information for the version in the image. Most providers also accept the
+variable name with `_FILE` appended, naming a file to read the secret from
+(Docker secrets).
+
+Recreate the container. The **Certificate** card in the web UI shows the
+request in progress, which usually takes a minute or two, and from then on
+which certificate is in use and until when. Until it arrives, and whenever a
+request fails, the self-signed certificate stays in use and the card shows
+what the DNS provider or Let's Encrypt complained about. Open the web UI as
+`https://mail.example.com:8080` and enter `mail.example.com` as the server in
+your mail clients: a certificate is only good for the names it was issued for,
+so connecting by IP address still warns.
+
+Good to know:
+
+- **Try it with the staging server first.** Let's Encrypt allows only a few
+  failed attempts per hour and a limited number of certificates per week. With
+  `MAILBRIDGE_ACME_SERVER: "staging"` you get test certificates (which clients
+  do not trust) from a server with generous limits. Remove the line once the
+  Certificate card shows one, and the real certificate is requested.
+- **Renewal is automatic.** The container checks twice a day and renews when a
+  third of the lifetime is left, without a restart and without interrupting
+  open mail sessions. The DNS token therefore has to stay valid.
+- **Several names and wildcards** work: `"mail.example.com,*.home.example.com"`.
+  When you change the list, the certificate is replaced at the next start.
+- **The certificate and the Let's Encrypt account** are kept in the volume,
+  under `/data/mailbridge/acme`.
+- If your LAN has a DNS server of its own that answers for the whole domain,
+  lego cannot find the real name servers through it. Point it at a public
+  resolver with `MAILBRIDGE_ACME_RESOLVERS: "1.1.1.1:53"`.
+- Other certificate authorities that speak ACME work too: put their directory
+  URL in `MAILBRIDGE_ACME_SERVER`.
+
+### Your own certificate
+
+If you already have a certificate, from another ACME client or your own CA,
+mount it and name the files:
+
+```yaml
+    volumes:
+      - mailbridge-data:/data
+      - /etc/letsencrypt/live/mail.example.com:/certs:ro
+    environment:
+      MAILBRIDGE_TLS_CERT: "/certs/fullchain.pem"
+      MAILBRIDGE_TLS_KEY: "/certs/privkey.pem"
+```
+
+The files have to be readable by `PUID`. When they change, because the other
+tool renewed the certificate, the container picks the new one up within a
+minute, without a restart.
+
+### What changes for mail clients
+
+Bridge can only ever present its own self-signed certificate. So with a
+Let's Encrypt certificate or one of your own, the container answers SMTP (and
+IMAP, unless Dovecot does) itself, with that certificate, and passes each
+session on to bridge over a second encrypted connection inside the container,
+on which it only accepts bridge's own certificate. Server, ports, security
+setting and passwords in the mail client stay the same; a client that had
+accepted bridge's certificate before will notice the new one once.
+
+One thing is stricter than bridge on its own: signing in before encryption has
+started is refused. Every current mail client starts encryption first anyway.
 
 ## Dovecot mode: full-text search and a standard IMAP server (optional)
 
@@ -127,8 +252,10 @@ can connect as soon as it says *in sync*.
 Mail client settings stay the same: same server, same username, same bridge
 password, port 143 with STARTTLS (or 993 with SSL/TLS). Two things differ:
 
-- IMAP presents the certificate of the web UI (your own, if you set
-  `MAILBRIDGE_TLS_CERT`), not bridge's. SMTP still presents bridge's.
+- IMAP presents the certificate of the web UI, not bridge's. SMTP still
+  presents bridge's, unless you set up
+  [a trusted certificate](#a-certificate-that-mail-clients-and-browsers-trust-optional),
+  which all three then share.
 - To a mail client, this is a different server than bridge was. A client that
   was already set up downloads the mailbox again after you switch, in either
   direction.
@@ -197,13 +324,24 @@ All settings are environment variables; none is required.
 | `MAILBRIDGE_PASSWORD_FILE` | | Same, read from a file (Docker secrets). |
 | `MAILBRIDGE_HOSTNAME` | browser's host | Server name shown in the mail client settings. |
 | `MAILBRIDGE_TLS` | `on` | `off` serves the web UI over plain HTTP, for use behind a TLS-terminating reverse proxy only. |
-| `MAILBRIDGE_TLS_CERT`, `MAILBRIDGE_TLS_KEY` | self-signed | Your own certificate and key for the web UI (PEM files). |
+| `MAILBRIDGE_TLS_CERT`, `MAILBRIDGE_TLS_KEY` | self-signed | Your own certificate (with its chain) and key, as PEM files, for the web UI, IMAP and SMTP. See [above](#your-own-certificate). |
 | `MAILBRIDGE_WEB_LISTEN` | `:8080` | Address the web UI listens on inside the container. |
 | `MAILBRIDGE_IMAP_LISTEN` | `:143` | Address(es) forwarded to bridge IMAP, comma separated. `off` disables. |
 | `MAILBRIDGE_SMTP_LISTEN` | `:587` | Address(es) forwarded to bridge SMTP, comma separated. `off` disables. |
 | `MAILBRIDGE_IMAP_PORT`, `MAILBRIDGE_SMTP_PORT` | listen port | Port numbers shown in the web UI, if you publish different host ports. |
 | `PUID`, `PGID` | `1000` | User and group that own `/data` and run bridge. |
 | `BRIDGE_LOG_LEVEL` | `info` | Bridge log level (`debug`, `info`, `warn`, `error`). |
+
+For a [Let's Encrypt certificate](#lets-encrypt):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MAILBRIDGE_ACME_DOMAINS` | | Name(s) to get the certificate for, comma separated. The first one is also the server name shown in the web UI, unless `MAILBRIDGE_HOSTNAME` is set. |
+| `MAILBRIDGE_ACME_DNS` | | lego's code for the DNS provider of the domain, such as `cloudflare`. The provider's own variables (`CLOUDFLARE_DNS_API_TOKEN`, ...) carry the credentials. |
+| `MAILBRIDGE_ACME_EMAIL` | | Optional contact address for the Let's Encrypt account. |
+| `MAILBRIDGE_ACME_SERVER` | Let's Encrypt | `staging` for Let's Encrypt's test server, or the directory URL of another ACME certificate authority. |
+| `MAILBRIDGE_ACME_RESOLVERS` | system | DNS resolver(s) lego uses to find the domain's name servers, such as `1.1.1.1:53`. |
+| `MAILBRIDGE_ACME_LEGO_ARGS` | | Further [options for lego](https://go-acme.github.io/lego/usage/cli/options/), such as `--dns.propagation-wait 2m` for a DNS provider that is slow to publish. |
 
 For [Dovecot mode](#dovecot-mode-full-text-search-and-a-standard-imap-server-optional):
 
@@ -221,7 +359,7 @@ For [Dovecot mode](#dovecot-mode-full-text-search-and-a-standard-imap-server-opt
 | `MAILBRIDGE_SYNC_DEBUG` | `off` | `on` writes what the sync does to the container log. |
 
 All state lives in the `/data` volume: the Proton session, the encrypted mail
-cache, the keychain, and the web UI password hash and certificate. Back it up
+cache, the keychain, the web UI password hash and the certificates. Back it up
 or lose it as one unit; if it is lost, sign in again and bridge re-downloads
 your mail.
 
@@ -234,6 +372,9 @@ Treat this container like the mail account itself.
   expire after 12 hours, and the page is served over HTTPS by default.
 - **Keep it on the LAN.** Do not publish ports 8080, 143, 993 or 587 to the
   internet. For remote access use a VPN.
+- **The DNS token for Let's Encrypt can change your domain's DNS.** Create one
+  that is limited to DNS records of the one domain, and prefer the `_FILE`
+  form of the variable over putting it in the compose file.
 - **The volume holds the keys.** Bridge stores the key to its vault in a
   `pass` keychain whose GPG key has no passphrase (there is nobody to type one
   when the container starts). Anyone who can read the volume can read the
@@ -281,6 +422,16 @@ when that happens.
   complained about; the rest of the mailbox keeps synchronising. A folder
   created outside `Folders/` and `Labels/` is the usual cause: move it there.
   If the two sides no longer line up, use *Rebuild from Proton*.
+- **The Let's Encrypt certificate does not arrive.** The Certificate card and
+  the container log (lines starting with `[lego]`) say why. The usual causes
+  are a token without permission to edit the domain's DNS, a domain that is
+  hosted at another provider than the one named, and a local DNS server that
+  answers for the whole domain (set `MAILBRIDGE_ACME_RESOLVERS`). After a
+  failure the container waits 15 minutes, then longer each time, to stay
+  within Let's Encrypt's limits; restart it to try again at once.
+- **Still a certificate warning with a trusted certificate.** The client is
+  connecting by IP address or by another name than the certificate was issued
+  for. Use the name on the Certificate card.
 - **Bind-mounting `/data`.** Use a local filesystem. GnuPG needs Unix sockets,
   which most network shares do not support.
 
@@ -296,7 +447,9 @@ process. It
 - serves the web UI, and
 - forwards the LAN-facing IMAP and SMTP ports to bridge, which itself only
   ever listens on `127.0.0.1`. The forwarding is byte-for-byte, so TLS is
-  still end-to-end between the mail client and bridge.
+  still end-to-end between the mail client and bridge. With a
+  [trusted certificate](#what-changes-for-mail-clients) it ends TLS itself
+  instead and opens a second TLS session to bridge.
 
 In Dovecot mode it also runs Dovecot, forwards the LAN-facing IMAP ports to it
 instead, and runs [mbsync](https://isync.sourceforge.io/) between Dovecot and

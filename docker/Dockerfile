@@ -53,7 +53,21 @@ RUN --mount=type=cache,target=/go/pkg/mod \
  && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/mailbridge .
 
 # ---------------------------------------------------------------------------
-# Stage 3: runtime
+# Stage 3: lego, the Let's Encrypt client behind MAILBRIDGE_ACME_DOMAINS
+# ---------------------------------------------------------------------------
+FROM go AS lego-build
+
+ARG LEGO_VERSION=v4.35.2
+
+# A program of its own instead of a library inside mailbridge: it knows how to
+# talk to nearly 200 DNS providers, and their client libraries stay out of
+# mailbridge this way. The Go checksum database vouches for the pinned version.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOBIN=/out go install -trimpath -ldflags='-s -w' github.com/go-acme/lego/v4/cmd/lego@${LEGO_VERSION}
+
+# ---------------------------------------------------------------------------
+# Stage 4: runtime
 # ---------------------------------------------------------------------------
 FROM ${BASE_IMAGE}
 
@@ -70,6 +84,7 @@ RUN apt-get update \
 COPY --from=bridge-build /out/bridge /usr/lib/protonmail/bridge/bridge
 COPY --from=bridge-build /out/LICENSE /usr/lib/protonmail/bridge/LICENSE
 COPY --from=web-build /out/mailbridge /usr/local/bin/mailbridge
+COPY --from=lego-build /out/lego /usr/local/bin/lego
 COPY --chmod=0755 docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 
 ENV HOME=/data \

@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -47,6 +48,21 @@ type Config struct {
 	SyncMaxDelete    int
 	SyncExclude      []string
 	SyncDebug        bool
+
+	// A Let's Encrypt (ACME) certificate, fetched and renewed by lego.
+	ACMEDomains   []string
+	ACMEDNS       string // lego's code for the DNS provider
+	ACMEEmail     string
+	ACMEServer    string // directory URL of the certificate authority
+	ACMEResolvers []string
+	ACMEArgs      []string // further options for lego
+	ACMEBin       string
+}
+
+// ManagedCert says whether there is a certificate that mail clients can be
+// expected to trust: the user's own, or one from Let's Encrypt.
+func (c Config) ManagedCert() bool {
+	return len(c.ACMEDomains) > 0 || c.TLSCert != ""
 }
 
 func envBool(key string, def bool) bool {
@@ -144,6 +160,36 @@ func loadConfig() Config {
 	if len(c.IMAPSListen) > 0 {
 		c.IMAPSPort = env("MAILBRIDGE_IMAPS_PORT", portOf(c.IMAPSListen, "993"))
 	}
+	c.ACMEDomains = splitList(strings.ToLower(env("MAILBRIDGE_ACME_DOMAINS", "")))
+	c.ACMEDNS = env("MAILBRIDGE_ACME_DNS", "")
+	c.ACMEEmail = env("MAILBRIDGE_ACME_EMAIL", "")
+	c.ACMEServer = env("MAILBRIDGE_ACME_SERVER", acmeProduction)
+	c.ACMEResolvers = splitList(env("MAILBRIDGE_ACME_RESOLVERS", ""))
+	c.ACMEArgs = strings.Fields(env("MAILBRIDGE_ACME_LEGO_ARGS", ""))
+	c.ACMEBin = env("LEGO_BIN", "lego")
+	switch strings.ToLower(c.ACMEServer) {
+	case "production":
+		c.ACMEServer = acmeProduction
+	case "staging":
+		c.ACMEServer = acmeStaging
+	}
+	switch {
+	case (len(c.ACMEDomains) > 0) != (c.ACMEDNS != ""):
+		log.Fatal("a Let's Encrypt certificate needs both MAILBRIDGE_ACME_DOMAINS and MAILBRIDGE_ACME_DNS")
+	case len(c.ACMEDomains) > 0 && (c.TLSCert != "" || c.TLSKey != ""):
+		log.Fatal("set either MAILBRIDGE_ACME_DOMAINS or MAILBRIDGE_TLS_CERT and MAILBRIDGE_TLS_KEY, not both")
+	case (c.TLSCert != "") != (c.TLSKey != ""):
+		log.Fatal("MAILBRIDGE_TLS_CERT and MAILBRIDGE_TLS_KEY must be set together")
+	}
+	for _, d := range c.ACMEDomains {
+		if !validDomain(d) {
+			log.Fatalf("MAILBRIDGE_ACME_DOMAINS: %q is not a domain name", d)
+		}
+		// The name mail clients are told to use, unless set explicitly.
+		if c.Hostname == "" && !strings.HasPrefix(d, "*.") {
+			c.Hostname = d
+		}
+	}
 	c.IMAPPort = env("MAILBRIDGE_IMAP_PORT", portOf(c.IMAPListen, "143"))
 	c.SMTPPort = env("MAILBRIDGE_SMTP_PORT", portOf(c.SMTPListen, "587"))
 
@@ -192,34 +238,59 @@ func main() {
 		log.Fatalf("cannot initialise web UI authentication: %v", err)
 	}
 
+	certs, err := NewCertStore(cfg)
+	if err != nil {
+		log.Fatalf("cannot set up the TLS certificate: %v", err)
+	}
+
 	bridge := NewBridge(cfg)
 
 	var wg sync.WaitGroup
+	run := func(fn func(context.Context)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fn(ctx)
+		}()
+	}
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		bridge.Run(ctx)
-	}()
+	run(bridge.Run)
+
+	var acme *ACME
+	switch {
+	case len(cfg.ACMEDomains) > 0:
+		acme = NewACME(cfg, certs)
+		acme.UseStored()
+		run(acme.Run)
+	case cfg.TLSCert != "":
+		// certbot, acme.sh and the like renew the files in place.
+		run(func(ctx context.Context) { certs.Watch(ctx, cfg.TLSCert, cfg.TLSKey, certOwn) })
+	}
+
+	// Bridge always presents its own self-signed certificate. With a
+	// certificate that mail clients trust, mailbridge answers them itself.
+	mail := func(name, proto string, addrs []string, target func() string, endpoint func() (string, bool)) {
+		for _, addr := range addrs {
+			if cfg.ManagedCert() {
+				startMailProxy(ctx, &wg, &mailProxy{name: name, proto: proto, certs: certs, upstream: endpoint, pinned: bridge.TLSCertificate}, addr)
+			} else {
+				startForwarder(ctx, &wg, name, addr, target, false)
+			}
+		}
+	}
 
 	var syncer *SyncManager
 	if cfg.DovecotMode {
 		// Mail clients talk to Dovecot; mailbridge keeps Dovecot and bridge in sync.
-		dovecot := NewDovecot(cfg)
+		dovecot := NewDovecot(cfg, certs)
 		if err := dovecot.Prepare(); err != nil {
 			log.Fatalf("cannot set up Dovecot mode: %v", err)
 		}
+		certs.OnChange(func() { dovecot.Reload(ctx) })
 		syncer = NewSyncManager(cfg, dovecot, bridge)
 
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			dovecot.Run(ctx)
-		}()
-		go func() {
-			defer wg.Done()
-			syncer.Run(ctx)
-		}()
+		run(dovecot.Run)
+		run(syncer.Run)
 
 		for _, addr := range cfg.IMAPListen {
 			startForwarder(ctx, &wg, "IMAP", addr, func() string { return dovecotIMAPAddr }, true)
@@ -231,15 +302,14 @@ func main() {
 		if len(cfg.IMAPSListen) > 0 {
 			log.Fatal("MAILBRIDGE_IMAPS_LISTEN needs MAILBRIDGE_DOVECOT=on; without Dovecot, switch IMAP to SSL/TLS in the web UI instead")
 		}
-		for _, addr := range cfg.IMAPListen {
-			startForwarder(ctx, &wg, "IMAP", addr, bridge.IMAPTarget, false)
-		}
+		mail("IMAP", "imap", cfg.IMAPListen, bridge.IMAPTarget, func() (string, bool) {
+			host, port, ssl := bridge.IMAPEndpoint()
+			return net.JoinHostPort(host, strconv.Itoa(port)), ssl
+		})
 	}
-	for _, addr := range cfg.SMTPListen {
-		startForwarder(ctx, &wg, "SMTP", addr, bridge.SMTPTarget, false)
-	}
+	mail("SMTP", "smtp", cfg.SMTPListen, bridge.SMTPTarget, bridge.SMTPEndpoint)
 
-	if err := serveWeb(ctx, cfg, auth, bridge, syncer); err != nil {
+	if err := serveWeb(ctx, cfg, auth, bridge, syncer, certs, acme); err != nil {
 		log.Printf("web server stopped: %v", err)
 		stop()
 	}
