@@ -1,9 +1,5 @@
 .git
-.github
 **/deploy
-**/node_modules
 docker/mailbridge/internal/bridgepb
 docker/*.md
 docker/docker-compose.yml
-tests
-release-notes

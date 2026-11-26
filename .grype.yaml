@@ -1,2 +1,0 @@
-# Check out for configuration details: https://github.com/anchore/grype?tab=readme-ov-file#configuration
-fail-on-severity: "medium"
