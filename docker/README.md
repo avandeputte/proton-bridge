@@ -12,17 +12,43 @@ by the container.
  your browser ──── HTTPS 8080 ─────────┘   (web UI, port forwarder, supervisor)
 ```
 
+<img src="screenshot.png" alt="The web UI: an account card with the IMAP and SMTP settings for mail clients, and the Proton sign-in form" width="720">
+
 ## Quick start
 
-From the repository root:
+A ready-made image for amd64 and arm64 is published at
+`ghcr.io/avandeputte/proton-bridge`. Save this as `docker-compose.yml` on your
+server:
 
-```sh
-docker compose -f docker/docker-compose.yml up -d --build
-docker compose -f docker/docker-compose.yml logs mailbridge | grep -A3 "random one"
+```yaml
+services:
+  mailbridge:
+    image: ghcr.io/avandeputte/proton-bridge:latest
+    container_name: mailbridge
+    restart: unless-stopped
+    ports:
+      - "8080:8080"   # web UI (HTTPS, self-signed)
+      - "143:143"     # IMAP (STARTTLS)
+      - "587:587"     # SMTP (STARTTLS)
+    volumes:
+      - mailbridge-data:/data
+
+volumes:
+  mailbridge-data:
 ```
 
-The first build compiles bridge from source and takes a few minutes. The second
-command prints the web UI password that was generated on first start.
+Then start it and read the web UI password that is generated on first start:
+
+```sh
+docker compose up -d
+docker compose logs mailbridge | grep -A3 "random one"
+```
+
+[docker-compose.yml](docker-compose.yml) in this directory is the same thing
+with the optional settings and container hardening spelled out. To build the
+image yourself instead of pulling it, clone the repository and run
+`docker compose -f docker/docker-compose.yml up -d --build`; compiling bridge
+takes a few minutes.
 
 1. Open `https://<your-server>:8080`. The certificate is self-signed, so the
    browser warns once; accept it.
@@ -94,12 +120,17 @@ Treat this container like the mail account itself.
 ## Updating
 
 Bridge cannot update itself inside the image, so automatic updates are turned
-off. To update, pull newer source and rebuild:
+off. To update, pull the newer image and recreate the container:
 
 ```sh
-git pull
-docker compose -f docker/docker-compose.yml up -d --build
+docker compose pull
+docker compose up -d
 ```
+
+`:latest` follows the `master` branch. Images are also tagged with the bridge
+version they contain (for example `:3.27.2`) and with the commit they were
+built from, if you prefer to pin. If you build the image yourself, `git pull`
+and run `up -d --build` again.
 
 Proton occasionally retires old bridge versions. The web UI shows a notice
 when that happens.
@@ -116,9 +147,9 @@ when that happens.
   verification*.
 - **Lost the web UI password.** Delete `webui.json` from the volume and
   restart; a new one is printed in the log:
-  `docker compose -f docker/docker-compose.yml exec mailbridge rm /data/mailbridge/webui.json`
+  `docker compose exec mailbridge rm /data/mailbridge/webui.json`
 - **Something is stuck.** *Show bridge log* in the web UI, or
-  `docker compose -f docker/docker-compose.yml logs -f mailbridge`.
+  `docker compose logs -f mailbridge`.
 - **Bind-mounting `/data`.** Use a local filesystem. GnuPG needs Unix sockets,
   which most network shares do not support.
 
