@@ -134,7 +134,8 @@ async function refresh() {
   show('view-app');
   render();
   if (logsOpen) loadLogs();
-  const busy = state.status !== 'running' || state.login.stage === 'working' || state.users.some((u) => u.syncing);
+  const busy = state.status !== 'running' || state.login.stage === 'working' || state.users.some((u) => u.syncing) ||
+    Object.values(state.sync || {}).some((x) => x.state === 'syncing');
   pollTimer = setTimeout(refresh, busy ? 1500 : 4000);
 }
 
@@ -150,9 +151,16 @@ function render() {
   $('version').textContent = state.version ? 'Bridge ' + state.version : '';
 
   if (changed('notices', state.notices)) renderNotices();
-  if (changed('accounts', [state.users, state.settings, state.connection, [...revealed]])) renderAccounts();
+  if (changed('accounts', [state.users, state.settings, state.connection, [...revealed], state.dovecot, syncView()])) renderAccounts();
   if (changed('login', [state.login, state.status])) renderLogin();
-  if (changed('settings', [state.settings, state.status])) renderSettings();
+  if (changed('settings', [state.settings, state.status, state.dovecot])) renderSettings();
+  if (changed('cert', state.dovecot)) {
+    $('cert-note').textContent = state.dovecot
+      ? 'In Dovecot mode, IMAP is encrypted with the same certificate as this page, and SMTP with bridge\'s own ' +
+        'self-signed certificate, which you can download here. Mail clients will ask you to accept them.'
+      : 'Bridge encrypts IMAP and SMTP with its own self-signed certificate. Mail clients will ask you to accept it; ' +
+        'import the downloaded certificate if your client needs it installed first.';
+  }
   if (changed('password', state.canChangePassword)) renderPassword();
 }
 
@@ -166,6 +174,66 @@ function renderNotices() {
   }
   box.append(h('button', { class: 'link small', type: 'button',
     onclick: (e) => act(e.target, () => api('DELETE', 'api/notices')) }, 'Dismiss all'));
+}
+
+// What the page shows of the Dovecot sync, per login. Rendering from this
+// instead of the raw status keeps the page still between routine syncs.
+function syncView() {
+  const out = {};
+  for (const [login, x] of Object.entries(state.sync || {})) {
+    const last = x.lastSync && !x.lastSync.startsWith('0001') ? new Date(x.lastSync) : null;
+    out[login] = {
+      state: x.state,
+      message: x.message || '',
+      messages: x.messages || 0,
+      pending: x.pendingDeletions || 0,
+      last: last ? last.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '',
+    };
+  }
+  return out;
+}
+
+function syncBlock(login, showLogin) {
+  const x = syncView()[login.toLowerCase()];
+  const block = h('div', { class: 'sync' });
+  if (showLogin) block.append(h('div', {}, h('code', {}, login)));
+  if (!x) {
+    block.append(h('span', { class: 'muted' }, 'Starting…'));
+    return block;
+  }
+
+  const post = (path) => api('POST', path, { login });
+  const button = (label, path, okMsg, confirmMsg, cls) => h('button', { class: 'mini' + (cls ? ' ' + cls : ''), type: 'button',
+    onclick: (e) => {
+      if (confirmMsg && !confirm(confirmMsg)) return;
+      act(e.target, () => post(path), okMsg);
+    } }, label);
+  const rebuildMsg = 'Delete the Dovecot copy of ' + login + ' and download it again from Proton? ' +
+    'Nothing is changed on Proton. Changes made in mail clients that were not synchronised yet are lost, ' +
+    'and mail clients will download the mailbox again.';
+
+  const pill = { ok: ['ok', 'in sync'], syncing: ['warn', 'synchronising'], waiting: ['warn', 'waiting'],
+    paused: ['err', 'paused'], error: ['err', 'problem'] }[x.state] || ['warn', x.state];
+  const summary = [x.messages + (x.messages === 1 ? ' message' : ' messages')];
+  if (x.last) summary.push('last synchronised ' + x.last);
+  block.append(h('div', { class: 'row' },
+    h('span', { class: 'pill ' + pill[0] }, pill[1]),
+    h('span', { class: 'muted small' }, summary.join(' · '))));
+
+  if (x.message) block.append(h('div', { class: 'sync-msg small' + (x.state === 'error' ? ' error' : '') }, x.message));
+
+  const actions = h('div', { class: 'row' });
+  if (x.state === 'paused') {
+    actions.append(
+      button('Restore them from Proton', 'api/sync/rebuild', 'Downloading the mailbox again', rebuildMsg),
+      button('Remove them from Proton too', 'api/sync/approve', 'Sync resumed',
+        'Remove ' + x.pending + ' messages from Proton as well? Deleted mail cannot be brought back from here.', 'danger'));
+  } else {
+    actions.append(button('Sync now', 'api/sync/run', 'Sync started'));
+    if (x.state !== 'waiting') actions.append(button('Rebuild from Proton', 'api/sync/rebuild', 'Downloading the mailbox again', rebuildMsg));
+  }
+  block.append(actions);
+  return block;
 }
 
 function accountCard(u) {
@@ -196,7 +264,9 @@ function accountCard(u) {
 
     card.append(h('div', { class: 'table-wrap' }, h('table', {},
       h('tr', {}, h('th', {}, 'IMAP server'),
-        h('td', {}, h('code', {}, c.host), ' port ', h('code', {}, c.imapPort), ' · ', s.imapSSL ? 'SSL/TLS' : 'STARTTLS')),
+        h('td', {}, h('code', {}, c.host), ' port ', h('code', {}, c.imapPort), ' · ',
+          (state.dovecot ? false : s.imapSSL) ? 'SSL/TLS' : 'STARTTLS',
+          (state.dovecot && c.imapsPort) ? [', or port ', h('code', {}, c.imapsPort), ' · SSL/TLS'] : null)),
       h('tr', {}, h('th', {}, 'SMTP server'),
         h('td', {}, h('code', {}, c.host), ' port ', h('code', {}, c.smtpPort), ' · ', s.smtpSSL ? 'SSL/TLS' : 'STARTTLS')),
       h('tr', {}, h('th', {}, u.splitMode ? 'Usernames' : 'Username'),
@@ -210,7 +280,9 @@ function accountCard(u) {
           } }, shown ? 'Hide' : 'Show'),
           copyBtn(u.password)))),
       (!u.splitMode && u.addresses.length > 1) && h('tr', {}, h('th', {}, 'Also receives'),
-        h('td', { class: 'muted' }, u.addresses.slice(1).join(', '))))));
+        h('td', { class: 'muted' }, u.addresses.slice(1).join(', '))),
+      (state.dovecot && u.state === 'connected') && h('tr', {}, h('th', {}, 'Dovecot copy'),
+        h('td', {}, logins.map((a) => syncBlock(a, logins.length > 1)))))));
 
     card.append(h('p', { class: 'muted small' },
       'This password is generated by bridge for mail clients only. It is not your Proton password.'));
@@ -345,18 +417,20 @@ function renderSettings() {
       h('label', { for: id }, title, h('span', { class: 'muted' }, help)));
   };
   const reconf = 'Mail clients must be reconfigured to match after this change. Continue?';
-  box.replaceChildren(
-    toggle('imapSSL', 'IMAP: use SSL/TLS instead of STARTTLS',
+  box.replaceChildren(...[
+    // In Dovecot mode mail clients talk IMAP to Dovecot, not to bridge.
+    state.dovecot ? null : toggle('imapSSL', 'IMAP: use SSL/TLS instead of STARTTLS',
       'Leave off unless your mail client cannot do STARTTLS. Both are encrypted.', reconf),
     toggle('smtpSSL', 'SMTP: use SSL/TLS instead of STARTTLS',
       'Leave off unless your mail client cannot do STARTTLS. Both are encrypted.', reconf),
-    toggle('allMailVisible', 'Show the "All Mail" folder',
+    state.dovecot ? null : toggle('allMailVisible', 'Show the "All Mail" folder',
       'Turn off if your mail client downloads every message twice.'),
     toggle('telemetryDisabled', 'Disable usage statistics',
       'Stops bridge from sending anonymous usage statistics to Proton.'),
     toggle('dohEnabled', 'Allow alternative routing',
       'Lets bridge reach Proton through third-party DNS-over-HTTPS if the direct route is blocked.'),
-    h('p', { class: 'muted small' }, 'Credentials are stored with the "' + (s.keychain || 'unknown') + '" keychain inside the data volume.'));
+    h('p', { class: 'muted small' }, 'Credentials are stored with the "' + (s.keychain || 'unknown') + '" keychain inside the data volume.'),
+  ].filter(Boolean));
 }
 
 function renderPassword() {

@@ -18,6 +18,7 @@ services:
       - "8080:8080"   # web UI (HTTPS, self-signed)
       - "143:143"     # IMAP (STARTTLS)
       - "587:587"     # SMTP (STARTTLS)
+      # - "993:993"   # IMAP (SSL/TLS), Dovecot mode with MAILBRIDGE_IMAPS_LISTEN only
     volumes:
       - mailbridge-data:/data
     environment:
@@ -28,6 +29,11 @@ services:
       # Fixed web UI password. Optional: without it a random one is generated on first
       # start, printed to the log, and can be changed in the web UI.
       # MAILBRIDGE_PASSWORD: "change-me-please"
+      # Dovecot mode: mail clients talk to a bundled Dovecot that is kept in two-way
+      # sync with bridge. Adds fast full-text search and a complete IMAP server, and
+      # keeps a second copy of the mail in the volume. See docker/README.md.
+      # MAILBRIDGE_DOVECOT: "on"
+      # MAILBRIDGE_IMAPS_LISTEN: ":993"
     security_opt:
       - no-new-privileges:true
     cap_drop:

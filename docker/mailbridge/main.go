@@ -12,9 +12,11 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // Config is read once from the environment at start-up.
@@ -32,6 +34,56 @@ type Config struct {
 	DataDir    string
 	BridgeBin  string
 	LogLevel   string
+
+	// Dovecot mode: mail clients talk to a bundled Dovecot, which is kept in
+	// two-way sync with bridge.
+	DovecotMode      bool
+	IMAPSListen      []string
+	IMAPSPort        string
+	MailDir          string
+	SyncFastInterval time.Duration
+	SyncFastBoxes    []string
+	SyncFullInterval time.Duration
+	SyncMaxDelete    int
+	SyncExclude      []string
+	SyncDebug        bool
+}
+
+func envBool(key string, def bool) bool {
+	switch strings.ToLower(env(key, "")) {
+	case "":
+		return def
+	case "on", "true", "1", "yes":
+		return true
+	case "off", "false", "0", "no":
+		return false
+	}
+	log.Fatalf("%s must be \"on\" or \"off\"", key)
+	return def
+}
+
+func envDuration(key string, def, floor time.Duration) time.Duration {
+	v := env(key, "")
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < floor {
+		log.Fatalf("%s must be a duration of at least %s, such as \"30s\" or \"5m\"", key, floor)
+	}
+	return d
+}
+
+func envInt(key string, def int) int {
+	v := env(key, "")
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		log.Fatalf("%s must be a non-negative number", key)
+	}
+	return n
 }
 
 func env(key, def string) string {
@@ -79,6 +131,18 @@ func loadConfig() Config {
 		DataDir:    env("MAILBRIDGE_DATA", filepath.Join(home, "mailbridge")),
 		BridgeBin:  env("BRIDGE_BIN", "/usr/lib/protonmail/bridge/bridge"),
 		LogLevel:   env("BRIDGE_LOG_LEVEL", "info"),
+	}
+	c.DovecotMode = envBool("MAILBRIDGE_DOVECOT", false)
+	c.IMAPSListen = splitList(env("MAILBRIDGE_IMAPS_LISTEN", ""))
+	c.MailDir = env("MAILBRIDGE_MAIL_DIR", filepath.Join(home, "dovecot"))
+	c.SyncFastInterval = envDuration("MAILBRIDGE_SYNC_INTERVAL", 15*time.Second, 5*time.Second)
+	c.SyncFastBoxes = splitList(env("MAILBRIDGE_SYNC_FOLDERS", "INBOX,Sent"))
+	c.SyncFullInterval = envDuration("MAILBRIDGE_SYNC_FULL_INTERVAL", 5*time.Minute, 30*time.Second)
+	c.SyncMaxDelete = envInt("MAILBRIDGE_SYNC_MAX_DELETE", 100)
+	c.SyncExclude = splitList(env("MAILBRIDGE_SYNC_EXCLUDE", "All Mail,Starred"))
+	c.SyncDebug = envBool("MAILBRIDGE_SYNC_DEBUG", false)
+	if len(c.IMAPSListen) > 0 {
+		c.IMAPSPort = env("MAILBRIDGE_IMAPS_PORT", portOf(c.IMAPSListen, "993"))
 	}
 	c.IMAPPort = env("MAILBRIDGE_IMAP_PORT", portOf(c.IMAPListen, "143"))
 	c.SMTPPort = env("MAILBRIDGE_SMTP_PORT", portOf(c.SMTPListen, "587"))
@@ -138,14 +202,44 @@ func main() {
 		bridge.Run(ctx)
 	}()
 
-	for _, addr := range cfg.IMAPListen {
-		startForwarder(ctx, &wg, "IMAP", addr, bridge.IMAPTarget)
+	var syncer *SyncManager
+	if cfg.DovecotMode {
+		// Mail clients talk to Dovecot; mailbridge keeps Dovecot and bridge in sync.
+		dovecot := NewDovecot(cfg)
+		if err := dovecot.Prepare(); err != nil {
+			log.Fatalf("cannot set up Dovecot mode: %v", err)
+		}
+		syncer = NewSyncManager(cfg, dovecot, bridge)
+
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			dovecot.Run(ctx)
+		}()
+		go func() {
+			defer wg.Done()
+			syncer.Run(ctx)
+		}()
+
+		for _, addr := range cfg.IMAPListen {
+			startForwarder(ctx, &wg, "IMAP", addr, func() string { return dovecotIMAPAddr }, true)
+		}
+		for _, addr := range cfg.IMAPSListen {
+			startForwarder(ctx, &wg, "IMAPS", addr, func() string { return dovecotIMAPSAddr }, true)
+		}
+	} else {
+		if len(cfg.IMAPSListen) > 0 {
+			log.Fatal("MAILBRIDGE_IMAPS_LISTEN needs MAILBRIDGE_DOVECOT=on; without Dovecot, switch IMAP to SSL/TLS in the web UI instead")
+		}
+		for _, addr := range cfg.IMAPListen {
+			startForwarder(ctx, &wg, "IMAP", addr, bridge.IMAPTarget, false)
+		}
 	}
 	for _, addr := range cfg.SMTPListen {
-		startForwarder(ctx, &wg, "SMTP", addr, bridge.SMTPTarget)
+		startForwarder(ctx, &wg, "SMTP", addr, bridge.SMTPTarget, false)
 	}
 
-	if err := serveWeb(ctx, cfg, auth, bridge); err != nil {
+	if err := serveWeb(ctx, cfg, auth, bridge, syncer); err != nil {
 		log.Printf("web server stopped: %v", err)
 		stop()
 	}

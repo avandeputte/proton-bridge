@@ -75,6 +75,118 @@ accept it, or download the certificate from **Maintenance** and import it if
 your client wants it installed. If a client cannot do STARTTLS, switch the
 protocol to SSL/TLS under **Settings**.
 
+## Dovecot mode: full-text search and a standard IMAP server (optional)
+
+Bridge's built-in IMAP server is deliberately small. Searching message text
+scans every message, undecoded, and many IMAP extensions that mail clients
+like are missing. With `MAILBRIDGE_DOVECOT=on` the container also runs
+[Dovecot](https://www.dovecot.org/), and mail clients talk to Dovecot instead:
+
+```
+ mail clients ── IMAP ── Dovecot ══ two-way sync ══ bridge ── Proton
+ mail clients ── SMTP ───────────────────────────── bridge ── Proton
+```
+
+What you get:
+
+- **Fast full-text search.** Every message is indexed as it arrives, on its
+  decoded text, so a search finds words in encoded bodies and is answered from
+  the index instead of by reading the whole mailbox.
+- **A complete IMAP server**: server-side sorting and threading, quick
+  resynchronisation (CONDSTORE, QRESYNC), special-use folders, and the rest of
+  what Dovecot offers.
+
+What it costs:
+
+- **A second copy of your mail** in the volume, as ordinary Maildir files, plus
+  the search index. Plan for a bit more than the size of the mailbox on top of
+  bridge's own cache. Unlike bridge's cache the files are not encrypted, though
+  the key to bridge's cache sits in the same volume anyway.
+- **Changes take a moment to travel**, see the timings below, and the first
+  copy of a large mailbox can take hours.
+
+Sending is unchanged: SMTP still goes straight to bridge.
+
+### Turning it on
+
+```yaml
+    ports:
+      - "8080:8080"
+      - "143:143"     # IMAP (STARTTLS), now served by Dovecot
+      - "993:993"     # IMAP (SSL/TLS), optional
+      - "587:587"
+    environment:
+      MAILBRIDGE_DOVECOT: "on"
+      MAILBRIDGE_IMAPS_LISTEN: ":993"   # optional
+```
+
+Recreate the container (`docker compose up -d`). Each account card in the web
+UI gets a **Dovecot copy** line that shows the state of the sync. Mail clients
+can connect as soon as it says *in sync*.
+
+Mail client settings stay the same: same server, same username, same bridge
+password, port 143 with STARTTLS (or 993 with SSL/TLS). Two things differ:
+
+- IMAP presents the certificate of the web UI (your own, if you set
+  `MAILBRIDGE_TLS_CERT`), not bridge's. SMTP still presents bridge's.
+- To a mail client, this is a different server than bridge was. A client that
+  was already set up downloads the mailbox again after you switch, in either
+  direction.
+
+If sent messages show up twice, turn off "save a copy of sent messages" in the
+mail client: Proton files everything sent through bridge in Sent by itself.
+
+### How the sync behaves
+
+| Change | Reaches the other side |
+|---|---|
+| Anything done in a mail client (read, flag, move, delete, file, new folder) | within about 5 seconds |
+| New mail in INBOX and Sent | within about 15 seconds |
+| Anything else changed on Proton's side (web, phone, filters) | within 5 minutes, or right away with **Sync now** |
+
+- Messages, read/starred/answered state, moves, deletions and folders travel
+  in both directions. A move in a mail client is a move on Proton, not a
+  re-upload.
+- `All Mail` is left out, because it holds every message a second time, and so
+  is `Starred`: stars travel as the flag on the message.
+- `Labels/...` folders hold a copy of each labelled message, as they do in
+  bridge.
+- New folders have to be created under `Folders/` or `Labels/`; Proton has no
+  other place for them. Renaming folders and deleting folders that still hold
+  mail is best done in Proton, and shows up in Dovecot at the next sync.
+- Messages that a client only marks as deleted are removed at the next sync,
+  as if the client had expunged them.
+
+### The deletion guard
+
+Deleting in Dovecot deletes on Proton, so a mail client gone wrong or a damaged
+volume could empty your mailbox. To prevent that, the sync pauses when more
+than 100 messages (`MAILBRIDGE_SYNC_MAX_DELETE`) were removed for good from
+Dovecot within an hour, and the web UI asks you what to do:
+
+- **Restore them from Proton** throws the Dovecot copy away and downloads the
+  mailbox again. Nothing is changed on Proton.
+- **Remove them from Proton too** lets the sync continue.
+
+Moving mail to Trash or Spam and emptying those does not count, only mail that
+disappears from the other folders does. Deletions made on Proton's side are
+always followed.
+
+**Rebuild from Proton** is also available at any time. It is the way out if
+the two sides ever disagree, for example after *Repair local cache*.
+
+### Limits
+
+This mode has been tested against bridge's IMAP engine (Gluon) and a second
+Dovecot standing in for Proton, not yet against a live Proton account. Keep an
+eye on the first days, and leave the deletion guard on.
+
+The container has to start as root (the default) so that it can prepare the
+user Dovecot runs as; `PUID`/`PGID` work, `docker run --user` does not.
+
+Turning the mode off again leaves the copy in `/data/dovecot`. Delete that
+directory to free the space.
+
 ## Configuration
 
 All settings are environment variables; none is required.
@@ -93,6 +205,21 @@ All settings are environment variables; none is required.
 | `PUID`, `PGID` | `1000` | User and group that own `/data` and run bridge. |
 | `BRIDGE_LOG_LEVEL` | `info` | Bridge log level (`debug`, `info`, `warn`, `error`). |
 
+For [Dovecot mode](#dovecot-mode-full-text-search-and-a-standard-imap-server-optional):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MAILBRIDGE_DOVECOT` | `off` | `on` puts Dovecot between mail clients and bridge. |
+| `MAILBRIDGE_IMAPS_LISTEN` | | Address(es) for IMAP over SSL/TLS, such as `:993`. |
+| `MAILBRIDGE_IMAPS_PORT` | listen port | Port number shown in the web UI, if you publish a different host port. |
+| `MAILBRIDGE_MAIL_DIR` | `/data/dovecot` | Where Dovecot keeps mail and search indexes. Another volume works if `PUID` can write to it. |
+| `MAILBRIDGE_SYNC_FOLDERS` | `INBOX,Sent` | Folders checked for changes on Proton's side every `MAILBRIDGE_SYNC_INTERVAL`. |
+| `MAILBRIDGE_SYNC_INTERVAL` | `15s` | How often those folders are checked. |
+| `MAILBRIDGE_SYNC_FULL_INTERVAL` | `5m` | How often all folders are checked. |
+| `MAILBRIDGE_SYNC_EXCLUDE` | `All Mail,Starred` | Folders that are not copied. `*` and `%` work as in IMAP. |
+| `MAILBRIDGE_SYNC_MAX_DELETE` | `100` | Removals per hour beyond which the sync waits for your confirmation. |
+| `MAILBRIDGE_SYNC_DEBUG` | `off` | `on` writes what the sync does to the container log. |
+
 All state lives in the `/data` volume: the Proton session, the encrypted mail
 cache, the keychain, and the web UI password hash and certificate. Back it up
 or lose it as one unit; if it is lost, sign in again and bridge re-downloads
@@ -105,7 +232,7 @@ Treat this container like the mail account itself.
 - **The web UI is password protected** because it shows the bridge passwords
   and accepts your Proton password. Sign-in attempts are throttled, sessions
   expire after 12 hours, and the page is served over HTTPS by default.
-- **Keep it on the LAN.** Do not publish ports 8080, 143 or 587 to the
+- **Keep it on the LAN.** Do not publish ports 8080, 143, 993 or 587 to the
   internet. For remote access use a VPN.
 - **The volume holds the keys.** Bridge stores the key to its vault in a
   `pass` keychain whose GPG key has no passphrase (there is nobody to type one
@@ -150,6 +277,10 @@ when that happens.
   `docker compose exec mailbridge rm /data/mailbridge/webui.json`
 - **Something is stuck.** *Show bridge log* in the web UI, or
   `docker compose logs -f mailbridge`.
+- **Dovecot copy says "problem".** The line below it is what the sync
+  complained about; the rest of the mailbox keeps synchronising. A folder
+  created outside `Folders/` and `Labels/` is the usual cause: move it there.
+  If the two sides no longer line up, use *Rebuild from Proton*.
 - **Bind-mounting `/data`.** Use a local filesystem. GnuPG needs Unix sockets,
   which most network shares do not support.
 
@@ -166,6 +297,11 @@ process. It
 - forwards the LAN-facing IMAP and SMTP ports to bridge, which itself only
   ever listens on `127.0.0.1`. The forwarding is byte-for-byte, so TLS is
   still end-to-end between the mail client and bridge.
+
+In Dovecot mode it also runs Dovecot, forwards the LAN-facing IMAP ports to it
+instead, and runs [mbsync](https://isync.sourceforge.io/) between Dovecot and
+bridge whenever something changed in Dovecot and on a timer. Dovecot accepts
+the same usernames and bridge passwords as bridge does.
 
 Bridge itself is built unmodified from this source tree.
 
