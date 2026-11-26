@@ -1,0 +1,44 @@
+# Proton Mail Bridge for your LAN, configured at https://<this-host>:8080
+#
+#   docker compose -f docker/docker-compose.yml up -d --build
+#   docker compose -f docker/docker-compose.yml logs mailbridge   # shows the first-start web UI password
+
+services:
+  mailbridge:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: mailbridge:local
+    container_name: mailbridge
+    restart: unless-stopped
+    ports:
+      # host:container. Change the left side if a port is already taken on the host,
+      # and set MAILBRIDGE_IMAP_PORT / MAILBRIDGE_SMTP_PORT so the web UI shows the right numbers.
+      - "8080:8080"   # web UI (HTTPS, self-signed)
+      - "143:143"     # IMAP (STARTTLS)
+      - "587:587"     # SMTP (STARTTLS)
+    volumes:
+      - mailbridge-data:/data
+    environment:
+      TZ: "Etc/UTC"
+      # Name or IP your mail clients use to reach this host. Optional: by default the
+      # web UI shows whatever name you typed into the browser.
+      # MAILBRIDGE_HOSTNAME: "nas.lan"
+      # Fixed web UI password. Optional: without it a random one is generated on first
+      # start, printed to the log, and can be changed in the web UI.
+      # MAILBRIDGE_PASSWORD: "change-me-please"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      # Only used by the entrypoint to take ownership of /data and switch to an
+      # unprivileged user; bridge and the web UI run without any capability.
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - FOWNER
+
+volumes:
+  mailbridge-data:
