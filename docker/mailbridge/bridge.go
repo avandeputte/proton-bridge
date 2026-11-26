@@ -183,6 +183,14 @@ func (b *Bridge) IMAPEndpoint() (string, int, bool) {
 }
 
 // Snapshot returns a copy of the current state for the web UI.
+// SMTPEndpoint is where bridge's SMTP server listens, and whether it expects
+// TLS from the first byte.
+func (b *Bridge) SMTPEndpoint() (string, bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return net.JoinHostPort(bridgeHost, strconv.Itoa(b.settings.SMTPPort)), b.settings.SMTPSSL
+}
+
 func (b *Bridge) Snapshot() State {
 	b.mu.RLock()
 	defer b.mu.RUnlock()

@@ -54,14 +54,18 @@
     </section>
 
     <section class="card">
+      <h2>Certificate</h2>
+      <div id="certificate" class="sync"></div>
+    </section>
+
+    <section class="card">
       <h2>Maintenance</h2>
       <div class="row">
-        <a class="button" href="api/certificate" download>Download bridge TLS certificate</a>
+        <a class="button" href="api/certificate" id="btn-cert" download>Download bridge TLS certificate</a>
         <button type="button" id="btn-restart">Restart bridge</button>
         <button type="button" id="btn-repair">Repair local cache</button>
         <button type="button" id="btn-logs">Show bridge log</button>
       </div>
-      <p class="muted small" id="cert-note"></p>
       <pre id="logs" hidden></pre>
     </section>
 

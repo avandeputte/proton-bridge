@@ -140,7 +140,7 @@ func startFarDovecot(t *testing.T, ctx context.Context, wg *sync.WaitGroup, dir 
 	if err := os.MkdirAll(filepath.Join(dir, "state"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	certPath, keyPath, err := ensureWebCertificate(Config{DataDir: dir})
+	certPath, keyPath, err := ensureSelfSigned(Config{DataDir: dir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +333,11 @@ func TestSyncIntegration(t *testing.T) {
 	farInbox, farWork := 9, 5
 
 	// --- start Dovecot mode -----------------------------------------------------
-	dovecot := NewDovecot(cfg)
+	certs, err := NewCertStore(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dovecot := NewDovecot(cfg, certs)
 	if err := dovecot.Prepare(); err != nil {
 		t.Fatal(err)
 	}

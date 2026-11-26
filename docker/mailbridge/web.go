@@ -28,6 +28,8 @@ type server struct {
 	auth   *Auth
 	bridge *Bridge
 	syncer *SyncManager // nil unless Dovecot mode is on
+	certs  *CertStore
+	acme   *ACME // nil unless a Let's Encrypt certificate is configured
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -180,12 +182,21 @@ func (s *server) routes() http.Handler {
 		if s.syncer != nil {
 			sync = s.syncer.Status()
 		}
+		var acme *ACMEStatus
+		if s.acme != nil {
+			st := s.acme.Status()
+			acme = &st
+		}
 		writeJSON(w, http.StatusOK, struct {
 			State
 			Connection        map[string]string     `json:"connection"`
 			CanChangePassword bool                  `json:"canChangePassword"`
 			Dovecot           bool                  `json:"dovecot"`
 			Sync              map[string]SyncStatus `json:"sync"`
+			Certificate       CertInfo              `json:"certificate"`
+			MailCertificate   bool                  `json:"mailCertificate"`
+			WebTLS            bool                  `json:"webTLS"`
+			ACME              *ACMEStatus           `json:"acme,omitempty"`
 		}{
 			State: s.bridge.Snapshot(),
 			Connection: map[string]string{
@@ -197,6 +208,10 @@ func (s *server) routes() http.Handler {
 			CanChangePassword: s.auth.CanChange(),
 			Dovecot:           s.syncer != nil,
 			Sync:              sync,
+			Certificate:       s.certs.Info(),
+			MailCertificate:   s.cfg.ManagedCert(),
+			WebTLS:            s.cfg.TLSMode == "on",
+			ACME:              acme,
 		})
 	}))
 
@@ -335,8 +350,8 @@ func (s *server) routes() http.Handler {
 	return headers(mux)
 }
 
-func serveWeb(ctx context.Context, cfg Config, auth *Auth, bridge *Bridge, syncer *SyncManager) error {
-	s := &server{cfg: cfg, auth: auth, bridge: bridge, syncer: syncer}
+func serveWeb(ctx context.Context, cfg Config, auth *Auth, bridge *Bridge, syncer *SyncManager, certs *CertStore, acme *ACME) error {
+	s := &server{cfg: cfg, auth: auth, bridge: bridge, syncer: syncer, certs: certs, acme: acme}
 
 	srv := &http.Server{
 		Addr:              cfg.WebListen,
@@ -360,11 +375,7 @@ func serveWeb(ctx context.Context, cfg Config, auth *Auth, bridge *Bridge, synce
 	}()
 
 	if cfg.TLSMode == "on" {
-		cert, err := webCertificate(cfg)
-		if err != nil {
-			return err
-		}
-		srv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+		srv.TLSConfig = certs.TLSConfig()
 		log.Printf("web UI listening on https://%s", ln.Addr())
 		err = srv.ServeTLS(ln, "", "")
 		if errors.Is(err, http.ErrServerClosed) {

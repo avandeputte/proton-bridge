@@ -36,16 +36,18 @@ const (
 // "Dovecot mode". It runs as the same unprivileged user as everything else.
 type Dovecot struct {
 	cfg        Config
+	certs      *CertStore
 	dir        string // generated configuration
 	confPath   string
 	passwdPath string
 	baseDir    string // runtime sockets, must be a short path
 }
 
-func NewDovecot(cfg Config) *Dovecot {
+func NewDovecot(cfg Config, certs *CertStore) *Dovecot {
 	dir := filepath.Join(cfg.DataDir, "dovecot")
 	return &Dovecot{
 		cfg:        cfg,
+		certs:      certs,
 		dir:        dir,
 		confPath:   filepath.Join(dir, "dovecot.conf"),
 		passwdPath: filepath.Join(dir, "passwd"),
@@ -69,10 +71,7 @@ func (d *Dovecot) Prepare() error {
 		return fmt.Errorf("Dovecot mode needs the container group to exist in /etc/group: %w", err)
 	}
 
-	certPath, keyPath, err := ensureWebCertificate(d.cfg)
-	if err != nil {
-		return err
-	}
+	certPath, keyPath := d.certs.Paths()
 
 	for _, dir := range []string{d.dir, filepath.Join(d.dir, "state"), d.cfg.MailDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -344,6 +343,26 @@ func (d *Dovecot) Flagged(ctx context.Context, login string) (map[string]int, er
 func (d *Dovecot) Subscribe(ctx context.Context, login string, boxes []string) error {
 	_, err := d.doveadm(ctx, append([]string{"mailbox", "subscribe", "-u", login}, boxes...)...)
 	return err
+}
+
+// Reload makes Dovecot read its configuration, and with it the certificate,
+// again. Sessions that are open carry on.
+func (d *Dovecot) Reload(ctx context.Context) {
+	// Dovecot may be on its way up, with the old certificate read already
+	// and not ready to be told yet. When it is down, its next start reads
+	// the new one anyway.
+	var err error
+	for try := 0; try < 5; try++ {
+		if _, err = d.doveadm(ctx, "reload"); err == nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+		}
+	}
+	log.Printf("Dovecot did not pick up the new certificate, it will at its next start: %v", err)
 }
 
 // Kick disconnects the mail clients of a login.

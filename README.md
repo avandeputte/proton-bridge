@@ -29,11 +29,16 @@ clients and bridge, kept in two-way sync, for fast full-text search and a
 complete IMAP server. See
 [Dovecot mode](docker/README.md#dovecot-mode-full-text-search-and-a-standard-imap-server-optional).
 
+With a domain name of your own, the container can also fetch and renew a
+Let's Encrypt certificate for the web page, IMAP and SMTP, so that browsers
+and mail clients stop asking about self-signed certificates. See
+[A certificate that mail clients and browsers trust](docker/README.md#a-certificate-that-mail-clients-and-browsers-trust-optional).
+
 ## What is in this repository
 
 | Path | Contents |
 |---|---|
-| `docker/` | Dockerfile, compose example, and `mailbridge`: the supervisor, web UI, LAN port forwarder and the optional Dovecot sync. |
+| `docker/` | Dockerfile, compose example, and `mailbridge`: the supervisor, web UI, LAN port forwarder, the optional Dovecot sync and the optional Let's Encrypt certificate. |
 | `.github/workflows/` | Builds the image for amd64 and arm64 and publishes it to `ghcr.io/avandeputte/proton-bridge`. |
 | `cmd/Desktop-Bridge`, `internal/`, `pkg/` | Proton Mail Bridge itself, unmodified, minus the parts a headless Linux container never uses. |
 | `Makefile` | `make build` builds the headless bridge binary, `make docker` builds the image. |
