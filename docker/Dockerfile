@@ -48,7 +48,9 @@ RUN sed -i 's/^package grpc$/package bridgepb/' internal/bridgepb/*.go
 
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/mailbridge .
+    CGO_ENABLED=0 go vet . \
+ && CGO_ENABLED=0 go test . \
+ && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/mailbridge .
 
 # ---------------------------------------------------------------------------
 # Stage 3: runtime
@@ -58,6 +60,7 @@ FROM ${BASE_IMAGE}
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates gnupg pass tini libsecret-1-0 libfido2-1 \
+      dovecot-imapd dovecot-fts-xapian isync \
  && rm -rf /var/lib/apt/lists/* \
  && (userdel --remove ubuntu 2>/dev/null || true) \
  && groupadd --gid 1000 bridge \
@@ -75,7 +78,7 @@ ENV HOME=/data \
     MAILBRIDGE_SMTP_LISTEN=:587
 
 VOLUME /data
-EXPOSE 8080 143 587
+EXPOSE 8080 143 587 993
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
     CMD ["/usr/local/bin/mailbridge", "healthcheck"]

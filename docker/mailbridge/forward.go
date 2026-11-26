@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -13,12 +14,15 @@ import (
 // returned by target. Bridge binds its IMAP and SMTP servers to 127.0.0.1 only,
 // so this is what makes them reachable from the LAN. The bytes are passed
 // through untouched: STARTTLS/TLS is still negotiated end-to-end with bridge.
-func startForwarder(ctx context.Context, wg *sync.WaitGroup, name, addr string, target func() string) {
+//
+// With proxyHeader, a PROXY protocol v1 line is sent first so the target (Dovecot)
+// knows the real client address for its logs and brute-force throttling.
+func startForwarder(ctx context.Context, wg *sync.WaitGroup, name, addr string, target func() string, proxyHeader bool) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		log.Fatalf("cannot listen for %s on %s: %v", name, addr, err)
 	}
-	log.Printf("forwarding %s: %s -> bridge", name, ln.Addr())
+	log.Printf("forwarding %s: %s -> %s", name, ln.Addr(), target())
 
 	wg.Add(1)
 	go func() {
@@ -38,22 +42,45 @@ func startForwarder(ctx context.Context, wg *sync.WaitGroup, name, addr string, 
 				time.Sleep(200 * time.Millisecond)
 				continue
 			}
-			go forward(ctx, name, conn, target())
+			go forward(ctx, name, conn, target(), proxyHeader)
 		}
 	}()
 }
 
-func forward(ctx context.Context, name string, client net.Conn, target string) {
+// proxyLine builds the PROXY protocol v1 header describing a client connection.
+func proxyLine(client net.Conn) string {
+	src, ok1 := client.RemoteAddr().(*net.TCPAddr)
+	dst, ok2 := client.LocalAddr().(*net.TCPAddr)
+	if !ok1 || !ok2 {
+		return "PROXY UNKNOWN\r\n"
+	}
+	if s4, d4 := src.IP.To4(), dst.IP.To4(); s4 != nil && d4 != nil {
+		return fmt.Sprintf("PROXY TCP4 %s %s %d %d\r\n", s4, d4, src.Port, dst.Port)
+	}
+	return fmt.Sprintf("PROXY TCP6 %s %s %d %d\r\n", src.IP.To16(), dst.IP.To16(), src.Port, dst.Port)
+}
+
+func forward(ctx context.Context, name string, client net.Conn, target string, proxyHeader bool) {
 	defer func() { _ = client.Close() }()
 
 	dialer := net.Dialer{Timeout: 5 * time.Second}
 	upstream, err := dialer.DialContext(ctx, "tcp", target)
 	if err != nil {
-		log.Printf("%s: connection from %s refused, bridge is not listening on %s (it only does once an account is signed in): %v",
-			name, client.RemoteAddr(), target, err)
+		hint := "bridge only does once an account is signed in"
+		if proxyHeader {
+			hint = "Dovecot is still starting"
+		}
+		log.Printf("%s: connection from %s refused, nothing is listening on %s (%s): %v",
+			name, client.RemoteAddr(), target, hint, err)
 		return
 	}
 	defer func() { _ = upstream.Close() }()
+
+	if proxyHeader {
+		if _, err := io.WriteString(upstream, proxyLine(client)); err != nil {
+			return
+		}
+	}
 
 	stop := context.AfterFunc(ctx, func() {
 		_ = client.Close()

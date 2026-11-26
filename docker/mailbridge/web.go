@@ -27,6 +27,7 @@ type server struct {
 	cfg    Config
 	auth   *Auth
 	bridge *Bridge
+	syncer *SyncManager // nil unless Dovecot mode is on
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -175,18 +176,27 @@ func (s *server) routes() http.Handler {
 				host = h
 			}
 		}
+		sync := map[string]SyncStatus{}
+		if s.syncer != nil {
+			sync = s.syncer.Status()
+		}
 		writeJSON(w, http.StatusOK, struct {
 			State
-			Connection        map[string]string `json:"connection"`
-			CanChangePassword bool              `json:"canChangePassword"`
+			Connection        map[string]string     `json:"connection"`
+			CanChangePassword bool                  `json:"canChangePassword"`
+			Dovecot           bool                  `json:"dovecot"`
+			Sync              map[string]SyncStatus `json:"sync"`
 		}{
 			State: s.bridge.Snapshot(),
 			Connection: map[string]string{
-				"host":     host,
-				"imapPort": s.cfg.IMAPPort,
-				"smtpPort": s.cfg.SMTPPort,
+				"host":      host,
+				"imapPort":  s.cfg.IMAPPort,
+				"imapsPort": s.cfg.IMAPSPort,
+				"smtpPort":  s.cfg.SMTPPort,
 			},
 			CanChangePassword: s.auth.CanChange(),
+			Dovecot:           s.syncer != nil,
+			Sync:              sync,
 		})
 	}))
 
@@ -284,6 +294,26 @@ func (s *server) routes() http.Handler {
 		writeResult(w, s.bridge.SetSplitMode(r.PathValue("id"), req.Active))
 	}))
 
+	// --- Dovecot mode sync ---------------------------------------------------------
+	syncAction := func(action func(*SyncManager, string) error) http.HandlerFunc {
+		return s.api(true, func(w http.ResponseWriter, r *http.Request) {
+			var req struct {
+				Login string `json:"login"`
+			}
+			if !readJSON(w, r, &req) {
+				return
+			}
+			if s.syncer == nil {
+				writeError(w, http.StatusBadRequest, "Dovecot mode is not enabled")
+				return
+			}
+			writeResult(w, action(s.syncer, req.Login))
+		})
+	}
+	mux.HandleFunc("POST /api/sync/run", syncAction((*SyncManager).SyncNow))
+	mux.HandleFunc("POST /api/sync/approve", syncAction((*SyncManager).ApproveDeletions))
+	mux.HandleFunc("POST /api/sync/rebuild", syncAction((*SyncManager).Rebuild))
+
 	// --- bridge -------------------------------------------------------------------
 	mux.HandleFunc("POST /api/settings", s.api(true, func(w http.ResponseWriter, r *http.Request) {
 		var req SettingsPatch
@@ -305,8 +335,8 @@ func (s *server) routes() http.Handler {
 	return headers(mux)
 }
 
-func serveWeb(ctx context.Context, cfg Config, auth *Auth, bridge *Bridge) error {
-	s := &server{cfg: cfg, auth: auth, bridge: bridge}
+func serveWeb(ctx context.Context, cfg Config, auth *Auth, bridge *Bridge, syncer *SyncManager) error {
+	s := &server{cfg: cfg, auth: auth, bridge: bridge, syncer: syncer}
 
 	srv := &http.Server{
 		Addr:              cfg.WebListen,

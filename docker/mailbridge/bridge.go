@@ -150,6 +150,38 @@ func (b *Bridge) SMTPTarget() string {
 	return net.JoinHostPort(bridgeHost, strconv.Itoa(b.settings.SMTPPort))
 }
 
+// MailAccounts lists the IMAP logins bridge currently serves, for Dovecot mode.
+func (b *Bridge) MailAccounts() []MailAccount {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	if b.status != "running" {
+		return nil
+	}
+
+	var out []MailAccount
+	for _, u := range b.users {
+		if u.State != "connected" || len(u.Addresses) == 0 {
+			continue
+		}
+		logins := u.Addresses[:1]
+		if u.SplitMode {
+			logins = u.Addresses
+		}
+		for _, login := range logins {
+			out = append(out, MailAccount{Login: login, Password: u.Password, Ready: !b.sync[u.ID].syncing})
+		}
+	}
+	return out
+}
+
+// IMAPEndpoint is where bridge's own IMAP server listens.
+func (b *Bridge) IMAPEndpoint() (string, int, bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return bridgeHost, b.settings.IMAPPort, b.settings.IMAPSSL
+}
+
 // Snapshot returns a copy of the current state for the web UI.
 func (b *Bridge) Snapshot() State {
 	b.mu.RLock()

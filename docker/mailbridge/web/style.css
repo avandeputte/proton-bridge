@@ -108,4 +108,7 @@ pre {
   position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); max-width: calc(100vw - 32px);
   background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 8px; font-size: 14px;
 }
+.sync { display: grid; gap: 6px; }
+.sync + .sync { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.sync-msg { white-space: pre-wrap; overflow-wrap: anywhere; }
 .offscreen { position: fixed; opacity: 0; }

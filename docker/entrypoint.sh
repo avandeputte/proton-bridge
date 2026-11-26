@@ -9,6 +9,18 @@ export HOME="$DATA"
 if [ "$(id -u)" = "0" ]; then
     RUN_UID="${PUID:-1000}"
     RUN_GID="${PGID:-1000}"
+    if [ "$RUN_UID" = "0" ]; then
+        echo "[entrypoint] PUID must not be 0: bridge and the mail server do not run as root" >&2
+        exit 1
+    fi
+    # Dovecot (MAILBRIDGE_DOVECOT=on) only serves mail for a user it finds in
+    # /etc/passwd, so the "bridge" user follows PUID and PGID.
+    if [ "$(id -g bridge)" != "$RUN_GID" ]; then
+        groupmod --non-unique --gid "$RUN_GID" bridge
+    fi
+    if [ "$(id -u bridge)" != "$RUN_UID" ]; then
+        usermod --non-unique --uid "$RUN_UID" bridge 2>/dev/null
+    fi
     mkdir -p "$DATA"
     if [ "$(stat -c '%u:%g' "$DATA")" != "$RUN_UID:$RUN_GID" ]; then
         echo "[entrypoint] fixing ownership of $DATA"

@@ -20,16 +20,29 @@ import (
 // the user, or a self-signed one generated on first start and kept in the data
 // directory so browsers only have to be told to trust it once.
 func webCertificate(cfg Config) (tls.Certificate, error) {
+	certPath, keyPath, err := ensureWebCertificate(cfg)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	return tls.LoadX509KeyPair(certPath, keyPath)
+}
+
+// ensureWebCertificate returns the paths of the certificate and key, creating
+// the self-signed pair if needed. Dovecot mode serves IMAP with the same pair.
+func ensureWebCertificate(cfg Config) (certPath, keyPath string, err error) {
 	if cfg.TLSCert != "" && cfg.TLSKey != "" {
-		return tls.LoadX509KeyPair(cfg.TLSCert, cfg.TLSKey)
+		if _, err := tls.LoadX509KeyPair(cfg.TLSCert, cfg.TLSKey); err != nil {
+			return "", "", err
+		}
+		return cfg.TLSCert, cfg.TLSKey, nil
 	}
 
-	certPath := filepath.Join(cfg.DataDir, "webui-cert.pem")
-	keyPath := filepath.Join(cfg.DataDir, "webui-key.pem")
+	certPath = filepath.Join(cfg.DataDir, "webui-cert.pem")
+	keyPath = filepath.Join(cfg.DataDir, "webui-key.pem")
 
 	if cert, err := tls.LoadX509KeyPair(certPath, keyPath); err == nil {
 		if leaf, err := x509.ParseCertificate(cert.Certificate[0]); err == nil && time.Now().Before(leaf.NotAfter.AddDate(0, -1, 0)) {
-			return cert, nil
+			return certPath, keyPath, nil
 		}
 	}
 
@@ -37,11 +50,11 @@ func webCertificate(cfg Config) (tls.Certificate, error) {
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return tls.Certificate{}, err
+		return "", "", err
 	}
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 127))
 	if err != nil {
-		return tls.Certificate{}, err
+		return "", "", err
 	}
 
 	names := []string{"mailbridge", "localhost"}
@@ -53,7 +66,7 @@ func webCertificate(cfg Config) (tls.Certificate, error) {
 	}
 	template := &x509.Certificate{
 		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: "mailbridge web UI"},
+		Subject:               pkix.Name{CommonName: "mailbridge"},
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().AddDate(2, 0, 0),
 		KeyUsage:              x509.KeyUsageDigitalSignature,
@@ -71,22 +84,22 @@ func webCertificate(cfg Config) (tls.Certificate, error) {
 
 	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
 	if err != nil {
-		return tls.Certificate{}, err
+		return "", "", err
 	}
 	keyDER, err := x509.MarshalECPrivateKey(key)
 	if err != nil {
-		return tls.Certificate{}, err
+		return "", "", err
 	}
 
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 
 	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
-		return tls.Certificate{}, err
+		return "", "", err
 	}
 	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
-		return tls.Certificate{}, err
+		return "", "", err
 	}
 
-	return tls.X509KeyPair(certPEM, keyPEM)
+	return certPath, keyPath, nil
 }

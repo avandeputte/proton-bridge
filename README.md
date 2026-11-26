@@ -24,11 +24,16 @@ server, port, username and password to enter in your mail client.
 
 **Full instructions, configuration and security notes: [docker/README.md](docker/README.md).**
 
+Optionally, `-e MAILBRIDGE_DOVECOT=on` puts a Dovecot server between your mail
+clients and bridge, kept in two-way sync, for fast full-text search and a
+complete IMAP server. See
+[Dovecot mode](docker/README.md#dovecot-mode-full-text-search-and-a-standard-imap-server-optional).
+
 ## What is in this repository
 
 | Path | Contents |
 |---|---|
-| `docker/` | Dockerfile, compose example, and `mailbridge`: the supervisor, web UI and LAN port forwarder. |
+| `docker/` | Dockerfile, compose example, and `mailbridge`: the supervisor, web UI, LAN port forwarder and the optional Dovecot sync. |
 | `.github/workflows/` | Builds the image for amd64 and arm64 and publishes it to `ghcr.io/avandeputte/proton-bridge`. |
 | `cmd/Desktop-Bridge`, `internal/`, `pkg/` | Proton Mail Bridge itself, unmodified, minus the parts a headless Linux container never uses. |
 | `Makefile` | `make build` builds the headless bridge binary, `make docker` builds the image. |
