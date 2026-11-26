@@ -1,14 +1,15 @@
 # Proton Mail Bridge for your LAN, configured at https://<this-host>:8080
 #
-#   docker compose -f docker/docker-compose.yml up -d --build
+#   docker compose -f docker/docker-compose.yml up -d             # pulls the published image
+#   docker compose -f docker/docker-compose.yml up -d --build     # or builds it from this source tree
 #   docker compose -f docker/docker-compose.yml logs mailbridge   # shows the first-start web UI password
 
 services:
   mailbridge:
+    image: ghcr.io/avandeputte/proton-bridge:latest
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    image: mailbridge:local
     container_name: mailbridge
     restart: unless-stopped
     ports:
