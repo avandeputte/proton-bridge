@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Mailbridge</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <h1>Mailbridge</h1>
+    <span class="sub">Proton Mail Bridge for your LAN</span>
+  </div>
+  <div class="top-right" id="top-right" hidden>
+    <span class="pill" id="status-pill">starting</span>
+    <span class="muted" id="version"></span>
+    <button class="link" id="sign-out" type="button">Sign out</button>
+  </div>
+</header>
+
+<main>
+  <section id="view-loading" class="card narrow"><p class="muted">Loading…</p></section>
+
+  <section id="view-signin" class="card narrow" hidden>
+    <h2>Sign in</h2>
+    <p class="muted">Enter the web UI password. On first start it is printed in the container log.</p>
+    <form id="signin-form">
+      <label>Password
+        <input type="password" id="signin-password" autocomplete="current-password" required autofocus>
+      </label>
+      <p class="error" id="signin-error" hidden></p>
+      <button type="submit" class="primary">Sign in</button>
+    </form>
+  </section>
+
+  <div id="view-app" hidden>
+    <div id="notices"></div>
+
+    <section>
+      <h2>Accounts</h2>
+      <div id="accounts"></div>
+    </section>
+
+    <section class="card" id="login-card">
+      <h2>Add a Proton account</h2>
+      <div id="login-body"></div>
+    </section>
+
+    <section class="card">
+      <h2>Settings</h2>
+      <div id="settings"></div>
+    </section>
+
+    <section class="card">
+      <h2>Maintenance</h2>
+      <div class="row">
+        <a class="button" href="api/certificate" download>Download bridge TLS certificate</a>
+        <button type="button" id="btn-restart">Restart bridge</button>
+        <button type="button" id="btn-repair">Repair local cache</button>
+        <button type="button" id="btn-logs">Show bridge log</button>
+      </div>
+      <p class="muted small">Bridge encrypts IMAP and SMTP with its own self-signed certificate. Mail clients will ask
+        you to accept it; import the downloaded certificate if your client needs it installed first.</p>
+      <pre id="logs" hidden></pre>
+    </section>
+
+    <section class="card" id="password-card">
+      <h2>Web UI password</h2>
+      <div id="password-body"></div>
+    </section>
+  </div>
+</main>
+
+<div id="toast" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

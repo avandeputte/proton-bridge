@@ -1,0 +1,5 @@
+.git
+**/deploy
+docker/mailbridge/internal/bridgepb
+docker/*.md
+docker/docker-compose.yml
