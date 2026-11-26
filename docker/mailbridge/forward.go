@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -44,6 +45,43 @@ func listen(ctx context.Context, wg *sync.WaitGroup, name, addr string, handle h
 		}
 	}()
 	return ln, nil
+}
+
+// How long a new connection is watched for a client that starts TLS by
+// itself. Mail servers speak first, so the greeting has to wait this long.
+// A TLS client sends its hello in the same breath as it connects, however
+// slow the link, and never needs more than a fraction of this.
+const tlsSniffWait = 300 * time.Millisecond
+
+// peeked is a connection whose first byte has been looked at already.
+type peeked struct {
+	net.Conn
+	r *bufio.Reader
+}
+
+func (p *peeked) Read(b []byte) (int, error) { return p.r.Read(b) }
+
+func (p *peeked) CloseWrite() error {
+	if half, ok := p.Conn.(interface{ CloseWrite() error }); ok {
+		return half.CloseWrite()
+	}
+	return nil
+}
+
+// startsWithTLS says whether a mail client that just connected opens with a
+// TLS handshake ("SSL/TLS" in mail clients, as on ports 993 and 465) instead
+// of waiting for the greeting and asking for STARTTLS. That lets every mail
+// port take both kinds of client, whichever of the two a client, or a
+// configuration profile, was set to. The connection it returns has to be
+// used from then on.
+func startsWithTLS(conn net.Conn) (net.Conn, bool) {
+	r := bufio.NewReaderSize(conn, 1024)
+	_ = conn.SetReadDeadline(time.Now().Add(tlsSniffWait))
+	first, err := r.Peek(1)
+	_ = conn.SetReadDeadline(time.Time{})
+	// 0x16 is the record type of a TLS handshake. No IMAP or SMTP command
+	// starts with it.
+	return &peeked{Conn: conn, r: r}, err == nil && first[0] == 0x16
 }
 
 // forwarder pipes connections to the address returned by target. Bridge binds
@@ -110,8 +148,8 @@ func forward(ctx context.Context, name string, client net.Conn, target string, p
 	done := make(chan struct{}, 2)
 	pipe := func(dst, src net.Conn) {
 		_, _ = io.Copy(dst, src)
-		if tcp, ok := dst.(*net.TCPConn); ok {
-			_ = tcp.CloseWrite()
+		if half, ok := dst.(interface{ CloseWrite() error }); ok {
+			_ = half.CloseWrite()
 		}
 		done <- struct{}{}
 	}

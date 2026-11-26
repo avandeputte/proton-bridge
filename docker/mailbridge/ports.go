@@ -222,7 +222,7 @@ func (p *Ports) Set(want PortSettings) error {
 		case port < 1 || port > 65535:
 			return fmt.Errorf("%d is not a port number", port)
 		case !p.Offers(service):
-			return errors.New("IMAP over SSL/TLS on a port of its own needs Dovecot mode. Without it, switch IMAP to SSL/TLS under Settings")
+			return errors.New("IMAP over SSL/TLS on a port of its own needs Dovecot mode. Without it, the IMAP port takes SSL/TLS as well as STARTTLS")
 		}
 	}
 

@@ -344,7 +344,7 @@ func mailSetup(t *testing.T, proto string, implicit bool, pin func(bridgeCertPat
 
 // mailSetupWhen is mailSetup with a proxy that only answers for itself
 // while active says so.
-func mailSetupWhen(t *testing.T, proto string, implicit bool, pin func(bridgeCertPath string) ([]byte, error), active func() bool) (proxyAddr, trusted, bridgeCert string, upstream *fakeMail) {
+func mailSetupWhen(t *testing.T, proto string, implicit bool, pin func(bridgeCertPath string) ([]byte, error), active func() bool, adjustments ...func(*mailProxy)) (proxyAddr, trusted, bridgeCert string, upstream *fakeMail) {
 	t.Helper()
 	bridgeCert, bridgeKey := testCert(t, "bridge.internal")
 	pair, err := tls.LoadX509KeyPair(bridgeCert, bridgeKey)
@@ -371,12 +371,16 @@ func mailSetupWhen(t *testing.T, proto string, implicit bool, pin func(bridgeCer
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
-	startMailProxy(ctx, &wg, &mailProxy{
+	proxy := &mailProxy{
 		name: strings.ToUpper(proto), proto: proto, certs: store,
 		upstream: func() (string, bool) { return upstream.addr, implicit },
 		pinned:   func() ([]byte, error) { return pin(bridgeCert) },
 		active:   active,
-	}, proxyAddr)
+	}
+	for _, adjust := range adjustments {
+		adjust(proxy)
+	}
+	startMailProxy(ctx, &wg, proxy, proxyAddr)
 	t.Cleanup(func() {
 		cancel()
 		wg.Wait()
@@ -499,6 +503,90 @@ func TestMailProxyImplicitTLS(t *testing.T) {
 				c.expect("a1 OK")
 			}
 		})
+	}
+}
+
+// Every mail port takes clients that ask for STARTTLS and clients that start
+// TLS from the first byte, whichever of the two bridge expects, and with or
+// without a certificate that clients trust.
+func TestMailProxyEitherWay(t *testing.T) {
+	for _, proto := range []string{"smtp", "imap"} {
+		for _, bridgeTLS := range []bool{false, true} {
+			for _, clientTLS := range []bool{false, true} {
+				for _, trustedCert := range []bool{true, false} {
+					name := fmt.Sprintf("%s/bridgeTLS=%v/clientTLS=%v/trusted=%v", proto, bridgeTLS, clientTLS, trustedCert)
+					t.Run(name, func(t *testing.T) {
+						t.Parallel()
+						addr, trusted, bridgeCert, upstream := mailSetupWhen(t, proto, bridgeTLS, nil, func() bool { return trustedCert })
+
+						// Bridge answers for itself when it has to anyway and speaks
+						// the way the client does. Otherwise the proxy does.
+						cert, certName, direct := trusted, "mail.example", false
+						if !trustedCert && bridgeTLS == clientTLS {
+							cert, certName, direct = bridgeCert, "bridge.internal", true
+						}
+
+						c := dialMail(t, addr)
+						if clientTLS {
+							c.startTLS(cert, certName)
+						}
+						if proto == "smtp" {
+							c.expect("220 ")
+							if !clientTLS {
+								c.send("EHLO client.example")
+								if reply := c.expect("250 "); !strings.Contains(reply, "STARTTLS") {
+									t.Fatalf("STARTTLS is not offered: %q", reply)
+								}
+								if !direct {
+									c.send("AUTH PLAIN AHVzZXIAcGFzcw==")
+									c.expect("530 ")
+								}
+								c.send("STARTTLS")
+								c.expect("220 ")
+								c.startTLS(cert, certName)
+							}
+							c.send("EHLO client.example")
+							if reply := c.expect("250 "); strings.Contains(reply, "STARTTLS") || !strings.Contains(reply, "AUTH") {
+								t.Fatalf("after TLS the server offers %q", reply)
+							}
+							c.send("AUTH PLAIN c2VjcmV0")
+							c.expect("235 ")
+							c.send("QUIT")
+							c.expect("221 ")
+							if !upstream.sawLine("AUTH PLAIN c2VjcmV0") || upstream.sawLine("AUTH PLAIN AHVzZXIAcGFzcw==") {
+								t.Fatalf("bridge saw %q", upstream.seen)
+							}
+							return
+						}
+						c.expect("* OK")
+						if !clientTLS {
+							c.send("a1 CAPABILITY")
+							if reply := c.expect("a1 OK"); !strings.Contains(reply, "STARTTLS") {
+								t.Fatalf("STARTTLS is not offered: %q", reply)
+							}
+							if !direct {
+								c.send("a2 LOGIN user early")
+								c.expect("a2 NO")
+							}
+							c.send("a3 STARTTLS")
+							c.expect("a3 OK")
+							c.startTLS(cert, certName)
+						}
+						c.send("a4 CAPABILITY")
+						if reply := c.expect("a4 OK"); !strings.Contains(reply, "AUTH=PLAIN") {
+							t.Fatalf("after TLS the server offers %q", reply)
+						}
+						c.send("a5 LOGIN user pass")
+						c.expect("a5 OK")
+						c.send("a6 LOGOUT")
+						c.expect("a6 OK")
+						if !upstream.sawLine("a5 LOGIN user pass") || upstream.sawLine("a2 LOGIN user early") {
+							t.Fatalf("bridge saw %q", upstream.seen)
+						}
+					})
+				}
+			}
+		}
 	}
 }
 

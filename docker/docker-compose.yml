@@ -16,9 +16,9 @@ services:
       # host:container. Change the left side if a port is already taken on the host,
       # and set MAILBRIDGE_IMAP_PORT / MAILBRIDGE_SMTP_PORT so the web UI shows the right numbers.
       - "8080:8080"   # web UI (HTTPS, self-signed)
-      - "143:143"     # IMAP (STARTTLS)
-      - "587:587"     # SMTP (STARTTLS)
-      # - "993:993"   # IMAP (SSL/TLS), Dovecot mode with MAILBRIDGE_IMAPS_LISTEN only
+      - "143:143"     # IMAP (STARTTLS or SSL/TLS)
+      - "587:587"     # SMTP (STARTTLS or SSL/TLS)
+      # - "993:993"   # IMAP on its customary SSL/TLS port, Dovecot mode with MAILBRIDGE_IMAPS_LISTEN only
     volumes:
       - mailbridge-data:/data
     environment:

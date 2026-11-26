@@ -267,14 +267,19 @@ func main() {
 
 	// Bridge always presents its own self-signed certificate. While there is
 	// a certificate that mail clients trust, mailbridge answers them itself.
+	// Every mail port takes clients that ask for STARTTLS and clients that
+	// start TLS right away, so that neither setting in a mail client is wrong.
 	ports := NewPorts(ctx, &wg, cfg)
-	smtp := &mailProxy{name: "SMTP", proto: "smtp", certs: certs, upstream: bridge.SMTPEndpoint, pinned: bridge.TLSCertificate, active: certs.Trusted}
+	trouble := &mailTrouble{certs: certs, notify: bridge.notify}
+	smtp := &mailProxy{name: "SMTP", proto: "smtp", certs: certs, upstream: bridge.SMTPEndpoint, pinned: bridge.TLSCertificate,
+		active: certs.Trusted, trouble: trouble.certificate}
 	ports.Handle(svcSMTP, smtp.handle)
 
 	var syncer *SyncManager
 	if cfg.DovecotMode {
 		// Mail clients talk to Dovecot; mailbridge keeps Dovecot and bridge in sync.
 		dovecot := NewDovecot(cfg, certs)
+		dovecot.onLog = trouble.dovecotLine
 		if err := dovecot.Prepare(); err != nil {
 			log.Fatalf("cannot set up Dovecot mode: %v", err)
 		}
@@ -284,13 +289,23 @@ func main() {
 		run(dovecot.Run)
 		run(syncer.Run)
 
-		ports.Handle(svcIMAP, forwarder("IMAP", func() string { return dovecotIMAPAddr }, true))
-		ports.Handle(svcIMAPS, forwarder("IMAPS", func() string { return dovecotIMAPSAddr }, true))
+		toDovecot := func(name string) handler {
+			return func(ctx context.Context, conn net.Conn) {
+				conn, startsTLS := startsWithTLS(conn)
+				target := dovecotIMAPAddr
+				if startsTLS {
+					target = dovecotIMAPSAddr
+				}
+				forward(ctx, name, conn, target, true)
+			}
+		}
+		ports.Handle(svcIMAP, toDovecot("IMAP"))
+		ports.Handle(svcIMAPS, toDovecot("IMAPS"))
 	} else {
 		if len(cfg.IMAPSListen) > 0 {
-			log.Fatal("MAILBRIDGE_IMAPS_LISTEN needs MAILBRIDGE_DOVECOT=on; without Dovecot, switch IMAP to SSL/TLS in the web UI instead")
+			log.Fatal("MAILBRIDGE_IMAPS_LISTEN needs MAILBRIDGE_DOVECOT=on; without Dovecot, the IMAP port takes SSL/TLS as well as STARTTLS")
 		}
-		imap := &mailProxy{name: "IMAP", proto: "imap", certs: certs, pinned: bridge.TLSCertificate, active: certs.Trusted,
+		imap := &mailProxy{name: "IMAP", proto: "imap", certs: certs, pinned: bridge.TLSCertificate, active: certs.Trusted, trouble: trouble.certificate,
 			upstream: func() (string, bool) {
 				host, port, ssl := bridge.IMAPEndpoint()
 				return net.JoinHostPort(host, strconv.Itoa(port)), ssl
