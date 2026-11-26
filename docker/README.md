@@ -77,6 +77,34 @@ container [a certificate that mail clients trust](#a-certificate-that-mail-clien
 If a client cannot do STARTTLS, switch the protocol to SSL/TLS under
 **Settings**.
 
+### iPhone, iPad and Mac: set-up with a profile
+
+Each account card has a button **Profile for iPhone, iPad and Mac**. It
+downloads a configuration profile that sets the account up in Apple's Mail
+app, with server, ports, username and bridge password filled in:
+
+- **iPhone and iPad:** open the web UI in Safari, tap the button and allow the
+  download. Then open the Settings app, tap *Profile Downloaded* near the top,
+  and install it.
+- **Mac:** download the profile and open it, then approve it in System
+  Settings under *Profiles* (*Device Management* on recent versions).
+
+Good to know:
+
+- The profile contains the bridge password, like the page it comes from.
+  Delete the downloaded file once it is installed, and do not send it around.
+- It is not signed, so the device calls it "Not Signed" or "Unverified". That
+  is expected.
+- It works without further questions when the container has
+  [a certificate that mail clients trust](#a-certificate-that-mail-clients-and-browsers-trust-optional).
+  With the self-signed certificate, Mail still asks you to accept it.
+- The profile uses the server name and ports the account card shows. If they
+  are wrong for your devices, correct them first under
+  [Ports and addresses](#ports-and-addresses).
+- An account in split mode gives one mail account per address.
+- Installing a newer profile for the same account replaces the earlier one.
+  Removing the profile removes the account from the device.
+
 ## A certificate that mail clients and browsers trust (optional)
 
 Out of the box the web page and the mail ports use self-signed certificates,
@@ -107,7 +135,14 @@ You need:
 3. **An API token from the DNS provider**, limited to editing DNS records of
    that one domain if the provider lets you.
 
-Then tell the container, here for Cloudflare:
+Then, in the web UI, press **Get a certificate from Let's Encrypt** in the
+**Certificate** card. Enter the name, pick the DNS provider, and the form asks
+for what that provider needs, such as the API token. Press **Save and request
+the certificate**. The settings are kept in the volume, and the token is never
+sent back to the page: when you open the form again it only says that a value
+is saved.
+
+The same can be set in the compose file instead, here for Cloudflare:
 
 ```yaml
     environment:
@@ -116,11 +151,14 @@ Then tell the container, here for Cloudflare:
       CLOUDFLARE_DNS_API_TOKEN: "your-token"
 ```
 
-`MAILBRIDGE_ACME_DNS` is the provider's code, and each provider reads its
-credentials from variables of its own. The work is done by
-[lego](https://go-acme.github.io/lego/), which is included in the image; its
-[list of DNS providers](https://go-acme.github.io/lego/dns/) has the code and
-the variables for every one. A few common ones:
+Settings from the compose file win: the form in the web UI is then switched
+off, and the container has to be recreated for a change.
+
+`MAILBRIDGE_ACME_DNS`, like the provider field of the form, is the provider's
+code, and each provider reads its credentials from variables of its own. The
+work is done by [lego](https://go-acme.github.io/lego/), which is included in
+the image; its [list of DNS providers](https://go-acme.github.io/lego/dns/) has
+the code and the variables for every one. A few common ones:
 
 | Provider | `MAILBRIDGE_ACME_DNS` | Credentials |
 |---|---|---|
@@ -140,32 +178,39 @@ information for the version in the image. Most providers also accept the
 variable name with `_FILE` appended, naming a file to read the secret from
 (Docker secrets).
 
-Recreate the container. The **Certificate** card in the web UI shows the
-request in progress, which usually takes a minute or two, and from then on
-which certificate is in use and until when. Until it arrives, and whenever a
-request fails, the self-signed certificate stays in use and the card shows
-what the DNS provider or Let's Encrypt complained about. Open the web UI as
+The **Certificate** card in the web UI shows the request in progress, which
+usually takes a minute or two, and from then on which certificate is in use
+and until when. The web page, IMAP and SMTP switch to it as soon as it is
+there, without a restart. Until it arrives, and whenever a request fails, the
+self-signed certificate stays in use and the card shows what the DNS provider
+or Let's Encrypt complained about. Open the web UI as
 `https://mail.example.com:8080` and enter `mail.example.com` as the server in
 your mail clients: a certificate is only good for the names it was issued for,
 so connecting by IP address still warns.
 
 Good to know:
 
-- **Try it with the staging server first.** Let's Encrypt allows only a few
-  failed attempts per hour and a limited number of certificates per week. With
-  `MAILBRIDGE_ACME_SERVER: "staging"` you get test certificates (which clients
-  do not trust) from a server with generous limits. Remove the line once the
-  Certificate card shows one, and the real certificate is requested.
+- **Try it in test mode first.** Let's Encrypt allows only a few failed
+  attempts per hour and a limited number of certificates per week. With
+  **Test mode** ticked in the form, or `MAILBRIDGE_ACME_SERVER: "staging"` in
+  the compose file, you get test certificates (which clients do not trust)
+  from a server with generous limits. Turn it off once the Certificate card
+  shows one, and the real certificate is requested.
 - **Renewal is automatic.** The container checks twice a day and renews when a
   third of the lifetime is left, without a restart and without interrupting
   open mail sessions. The DNS token therefore has to stay valid.
 - **Several names and wildcards** work: `"mail.example.com,*.home.example.com"`.
-  When you change the list, the certificate is replaced at the next start.
+  When you change the list, the certificate is replaced: right away from the
+  web UI, at the next start from the compose file.
 - **The certificate and the Let's Encrypt account** are kept in the volume,
-  under `/data/mailbridge/acme`.
+  under `/data/mailbridge/acme`, and what you entered in the web UI in
+  `/data/mailbridge/acme.json`.
+- **Turn off Let's Encrypt** in the form goes back to the self-signed
+  certificate and forgets the token.
 - If your LAN has a DNS server of its own that answers for the whole domain,
   lego cannot find the real name servers through it. Point it at a public
-  resolver with `MAILBRIDGE_ACME_RESOLVERS: "1.1.1.1:53"`.
+  resolver: `1.1.1.1:53` under **Advanced** in the form, or
+  `MAILBRIDGE_ACME_RESOLVERS: "1.1.1.1:53"`.
 - Other certificate authorities that speak ACME work too: put their directory
   URL in `MAILBRIDGE_ACME_SERVER`.
 
@@ -193,12 +238,121 @@ Bridge can only ever present its own self-signed certificate. So with a
 Let's Encrypt certificate or one of your own, the container answers SMTP (and
 IMAP, unless Dovecot does) itself, with that certificate, and passes each
 session on to bridge over a second encrypted connection inside the container,
-on which it only accepts bridge's own certificate. Server, ports, security
-setting and passwords in the mail client stay the same; a client that had
-accepted bridge's certificate before will notice the new one once.
+on which it only accepts bridge's own certificate. It starts doing so the
+moment the certificate is there, for new sessions. Ports, security setting and
+passwords in the mail client stay the same; a client that had accepted
+bridge's certificate before will notice the new one once. The server to enter
+is a name on the certificate, and the account card shows that name from then
+on.
 
 One thing is stricter than bridge on its own: signing in before encryption has
 started is refused. Every current mail client starts encryption first anyway.
+
+## Ports and addresses
+
+Under **Settings**, the web UI has two groups of fields for where mail clients
+and browsers find the container. Both take effect when you save, without a
+restart, and are kept in the volume.
+
+### Other port numbers
+
+**Ports this container listens on** opens IMAP, SMTP or, in Dovecot mode, IMAP
+with SSL/TLS on a port of your choice. The port is opened in addition to the
+one from the compose file (143, 587), so nothing that works stops working, and
+the account card and the profiles show the new one from then on.
+
+How the new port reaches your LAN depends on how the container is attached:
+
+- With `network_mode: host`, it is simply there.
+- With published ports, publish it too and recreate the container, for
+  example `- "2143:2143"`. If all you want is another number on the host, you
+  can leave the container alone, publish `"2143:143"`, and enter 2143 under
+  *Addresses that browsers and mail clients use* instead.
+
+The port of the web UI itself is not changed from the page: publish it under
+another number (`"9443:8080"`), or set `MAILBRIDGE_WEB_LISTEN`.
+
+### Behind a reverse proxy
+
+**Addresses that browsers and mail clients use** is for everything that sits
+between your devices and the container. Nothing there opens or closes a port:
+the fields say what the page shows, what goes into profiles, and where the
+page itself is found.
+
+**The web UI behind an HTTP reverse proxy.** Enter the address the proxy
+serves it at under *Address of this page*, such as `https://mail.example.com`
+or, on a sub-path, `https://example.com/mailbridge`. The same can be given as
+`MAILBRIDGE_PUBLIC_URL`; the field in the web UI wins if both are set.
+
+- On a sub-path, the proxy may pass the path on as it is or cut the prefix
+  off: both work. The page also keeps working at the container's own address,
+  so a mistake can always be put right there. For the same reason the path
+  cannot be changed from behind a proxy that passes it on.
+- The container serves HTTPS with its own certificate. Either tell the proxy
+  not to verify it (nginx does not by default; Caddy needs
+  `tls_insecure_skip_verify`, Traefik `insecureSkipVerify`), or set
+  `MAILBRIDGE_TLS: "off"` and proxy to plain HTTP, on a network only the
+  proxy can reach.
+- A proxy on the internet puts the sign-in page on the internet. See
+  [Security](#security).
+
+For example with nginx, on a sub-path:
+
+```nginx
+location /mailbridge/ {
+    proxy_pass https://192.168.1.10:8080;
+    proxy_set_header X-Forwarded-For $remote_addr;
+}
+```
+
+or with Caddy, on a name of its own:
+
+```
+mail.example.com {
+    reverse_proxy https://192.168.1.10:8080 {
+        transport http {
+            tls_insecure_skip_verify
+        }
+    }
+}
+```
+
+**IMAP and SMTP behind a TCP proxy** (nginx `stream`, HAProxy in `tcp` mode,
+Traefik TCP routers, a port forward on a router). Enter the name and the ports
+that mail clients connect to under *Mail server name*, *IMAP port* and *SMTP
+port*. The account card and the profiles then show those, whatever the
+container itself listens on.
+
+- **Pass the connection through unchanged.** The container does the
+  encryption itself, with STARTTLS or SSL/TLS, and needs to see the session
+  from its first byte. A proxy cannot end STARTTLS on the container's behalf.
+- **The certificate is still the container's.** For clients to trust it, the
+  certificate has to be good for the name they connect to, the proxy's. With
+  [Let's Encrypt](#lets-encrypt) that is the name to ask the certificate for;
+  nothing about the proxy has to change, since the proof goes through DNS.
+- **Routing by server name (SNI)** only works for sessions that start with
+  TLS. Use IMAP with SSL/TLS (port 993 in Dovecot mode, or the switch under
+  **Settings** without it) and switch SMTP to SSL/TLS under **Settings**.
+- **Turn the PROXY protocol off** for these backends (`send-proxy` in HAProxy,
+  `proxy_protocol on` in nginx). The container does not expect that header and
+  the session would fail.
+- Every client then appears to come from the proxy's address, in the log and
+  to the limits on wrong passwords.
+
+For example with nginx, passing ports 993 and 465 on to the container's
+143 and 587 would not work, because the first two start with TLS and the
+other two with STARTTLS. Keep like with like:
+
+```nginx
+stream {
+    server { listen 143; proxy_pass 192.168.1.10:143; }
+    server { listen 587; proxy_pass 192.168.1.10:587; }
+}
+```
+
+`MAILBRIDGE_HOSTNAME`, `MAILBRIDGE_IMAP_PORT`, `MAILBRIDGE_SMTP_PORT` and
+`MAILBRIDGE_IMAPS_PORT` set the same server name and ports from the compose
+file. A field filled in on the page wins over them.
 
 ## Dovecot mode: full-text search and a standard IMAP server (optional)
 
@@ -316,27 +470,32 @@ directory to free the space.
 
 ## Configuration
 
-All settings are environment variables; none is required.
+None of these environment variables is required. The Let's Encrypt
+certificate, extra ports and the addresses shown to clients can also be set
+in the web UI, which keeps them in the volume.
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `MAILBRIDGE_PASSWORD` | generated | Fixed web UI password. When set it cannot be changed from the page. |
 | `MAILBRIDGE_PASSWORD_FILE` | | Same, read from a file (Docker secrets). |
-| `MAILBRIDGE_HOSTNAME` | browser's host | Server name shown in the mail client settings. |
+| `MAILBRIDGE_HOSTNAME` | automatic | Server name shown in the mail client settings and written into profiles. Left out, it is the first name on a trusted certificate, else the host of the public URL, else the name your browser used. *Mail server name* in the web UI wins. |
+| `MAILBRIDGE_PUBLIC_URL` | | Address of the web UI [behind a reverse proxy](#behind-a-reverse-proxy), such as `https://example.com/mailbridge`. *Address of this page* in the web UI wins. |
 | `MAILBRIDGE_TLS` | `on` | `off` serves the web UI over plain HTTP, for use behind a TLS-terminating reverse proxy only. |
 | `MAILBRIDGE_TLS_CERT`, `MAILBRIDGE_TLS_KEY` | self-signed | Your own certificate (with its chain) and key, as PEM files, for the web UI, IMAP and SMTP. See [above](#your-own-certificate). |
 | `MAILBRIDGE_WEB_LISTEN` | `:8080` | Address the web UI listens on inside the container. |
 | `MAILBRIDGE_IMAP_LISTEN` | `:143` | Address(es) forwarded to bridge IMAP, comma separated. `off` disables. |
 | `MAILBRIDGE_SMTP_LISTEN` | `:587` | Address(es) forwarded to bridge SMTP, comma separated. `off` disables. |
-| `MAILBRIDGE_IMAP_PORT`, `MAILBRIDGE_SMTP_PORT` | listen port | Port numbers shown in the web UI, if you publish different host ports. |
+| `MAILBRIDGE_IMAP_PORT`, `MAILBRIDGE_SMTP_PORT` | listen port | Port numbers shown in the web UI and written into profiles, if clients use other ports than the container listens on. The ports under *Addresses that browsers and mail clients use* in the web UI win. |
 | `PUID`, `PGID` | `1000` | User and group that own `/data` and run bridge. |
 | `BRIDGE_LOG_LEVEL` | `info` | Bridge log level (`debug`, `info`, `warn`, `error`). |
 
-For a [Let's Encrypt certificate](#lets-encrypt):
+For a [Let's Encrypt certificate](#lets-encrypt), instead of the form in the
+web UI. With `MAILBRIDGE_ACME_DOMAINS` set, the form is switched off; the
+other variables also apply to a certificate set up in the form, as defaults:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MAILBRIDGE_ACME_DOMAINS` | | Name(s) to get the certificate for, comma separated. The first one is also the server name shown in the web UI, unless `MAILBRIDGE_HOSTNAME` is set. |
+| `MAILBRIDGE_ACME_DOMAINS` | | Name(s) to get the certificate for, comma separated. |
 | `MAILBRIDGE_ACME_DNS` | | lego's code for the DNS provider of the domain, such as `cloudflare`. The provider's own variables (`CLOUDFLARE_DNS_API_TOKEN`, ...) carry the credentials. |
 | `MAILBRIDGE_ACME_EMAIL` | | Optional contact address for the Let's Encrypt account. |
 | `MAILBRIDGE_ACME_SERVER` | Let's Encrypt | `staging` for Let's Encrypt's test server, or the directory URL of another ACME certificate authority. |
@@ -359,7 +518,9 @@ For [Dovecot mode](#dovecot-mode-full-text-search-and-a-standard-imap-server-opt
 | `MAILBRIDGE_SYNC_DEBUG` | `off` | `on` writes what the sync does to the container log. |
 
 All state lives in the `/data` volume: the Proton session, the encrypted mail
-cache, the keychain, the web UI password hash and the certificates. Back it up
+cache, the keychain, the web UI password hash, the certificates and what was
+set in the web UI (`acme.json`, `ports.json` and `public.json` in
+`/data/mailbridge`; delete one and restart to go back to the defaults). Back it up
 or lose it as one unit; if it is lost, sign in again and bridge re-downloads
 your mail.
 
@@ -371,10 +532,16 @@ Treat this container like the mail account itself.
   and accepts your Proton password. Sign-in attempts are throttled, sessions
   expire after 12 hours, and the page is served over HTTPS by default.
 - **Keep it on the LAN.** Do not publish ports 8080, 143, 993 or 587 to the
-  internet. For remote access use a VPN.
+  internet, and think twice before putting a reverse proxy that faces the
+  internet in front of them: the web UI password is then all that stands
+  between the internet and your mail. For remote access use a VPN.
 - **The DNS token for Let's Encrypt can change your domain's DNS.** Create one
-  that is limited to DNS records of the one domain, and prefer the `_FILE`
-  form of the variable over putting it in the compose file.
+  that is limited to DNS records of the one domain. Entered in the web UI, it
+  is stored in the volume, in a file only the container's user can read, and
+  never shown again. In the compose file, prefer the `_FILE` form of the
+  variable.
+- **A profile for Apple devices contains the bridge password.** Delete the
+  downloaded file after installing it.
 - **The volume holds the keys.** Bridge stores the key to its vault in a
   `pass` keychain whose GPG key has no passphrase (there is nobody to type one
   when the container starts). Anyone who can read the volume can read the
@@ -426,12 +593,22 @@ when that happens.
   the container log (lines starting with `[lego]`) say why. The usual causes
   are a token without permission to edit the domain's DNS, a domain that is
   hosted at another provider than the one named, and a local DNS server that
-  answers for the whole domain (set `MAILBRIDGE_ACME_RESOLVERS`). After a
-  failure the container waits 15 minutes, then longer each time, to stay
-  within Let's Encrypt's limits; restart it to try again at once.
+  answers for the whole domain (set a DNS resolver under **Advanced** in the
+  form, or `MAILBRIDGE_ACME_RESOLVERS`). After a failure the container waits
+  15 minutes, then longer each time, to stay within Let's Encrypt's limits;
+  **Try again now** in the Certificate card skips the wait.
 - **Still a certificate warning with a trusted certificate.** The client is
   connecting by IP address or by another name than the certificate was issued
   for. Use the name on the Certificate card.
+- **A port set in the web UI cannot be opened.** Something else in the
+  container's network uses it. With `network_mode: host` that includes
+  everything else on the server, and ports below 1024 are usually off limits
+  there for the unprivileged user the container runs as. The page says so
+  when you save, and shows a notice if it happens at start.
+- **The page does not load behind a reverse proxy on a sub-path.** If the
+  proxy passes the path on unchanged, the container has to know the path:
+  open the page at its own address and fill in *Address of this page*, or set
+  `MAILBRIDGE_PUBLIC_URL`.
 - **Bind-mounting `/data`.** Use a local filesystem. GnuPG needs Unix sockets,
   which most network shares do not support.
 
@@ -447,7 +624,7 @@ process. It
 - serves the web UI, and
 - forwards the LAN-facing IMAP and SMTP ports to bridge, which itself only
   ever listens on `127.0.0.1`. The forwarding is byte-for-byte, so TLS is
-  still end-to-end between the mail client and bridge. With a
+  still end-to-end between the mail client and bridge. While it has a
   [trusted certificate](#what-changes-for-mail-clients) it ends TLS itself
   instead and opens a second TLS session to bridge.
 

@@ -31,8 +31,15 @@ complete IMAP server. See
 
 With a domain name of your own, the container can also fetch and renew a
 Let's Encrypt certificate for the web page, IMAP and SMTP, so that browsers
-and mail clients stop asking about self-signed certificates. See
+and mail clients stop asking about self-signed certificates. It is set up in
+the web UI. See
 [A certificate that mail clients and browsers trust](docker/README.md#a-certificate-that-mail-clients-and-browsers-trust-optional).
+
+The web UI also sets other port numbers, the addresses to show when the
+container sits behind a reverse proxy
+([Ports and addresses](docker/README.md#ports-and-addresses)), and hands out
+profiles that set the account up in Mail on iPhone, iPad and Mac
+([set-up with a profile](docker/README.md#iphone-ipad-and-mac-set-up-with-a-profile)).
 
 ## What is in this repository
 
