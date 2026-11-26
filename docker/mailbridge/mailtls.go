@@ -21,8 +21,8 @@ import (
 // passes the session on to bridge.
 //
 // Bridge only ever presents its own self-signed certificate and cannot be
-// given another one. So when there is a certificate that mail clients trust (a
-// Let's Encrypt one, or the user's own), the plain byte-for-byte forwarder is
+// given another one. So while there is a certificate that mail clients trust
+// (a Let's Encrypt one, or the user's own), byte-for-byte forwarding is
 // replaced by this: TLS with the client ends here, a second TLS session runs
 // from here to bridge on loopback, and the decrypted bytes are copied between
 // the two.
@@ -39,6 +39,10 @@ type mailProxy struct {
 	// pinned returns bridge's certificate (PEM). The upstream session is
 	// only accepted with exactly that certificate.
 	pinned func() ([]byte, error)
+	// active says whether there is a certificate worth presenting. While
+	// there is not, sessions are forwarded untouched and bridge presents
+	// its own. Nil means always.
+	active func() bool
 
 	mu        sync.Mutex
 	pinnedDER []byte
@@ -51,34 +55,12 @@ const (
 )
 
 func startMailProxy(ctx context.Context, wg *sync.WaitGroup, p *mailProxy, addr string) {
-	ln, err := net.Listen("tcp", addr)
+	ln, err := listen(ctx, wg, p.name, addr, p.handle)
 	if err != nil {
 		log.Fatalf("cannot listen for %s on %s: %v", p.name, addr, err)
 	}
 	target, _ := p.upstream()
-	log.Printf("serving %s on %s with the certificate in use, passing sessions on to bridge at %s", p.name, ln.Addr(), target)
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		<-ctx.Done()
-		_ = ln.Close()
-	}()
-
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				log.Printf("%s accept failed: %v", p.name, err)
-				time.Sleep(200 * time.Millisecond)
-				continue
-			}
-			go p.handle(ctx, conn)
-		}
-	}()
+	log.Printf("serving %s on %s, passing sessions on to bridge at %s", p.name, ln.Addr(), target)
 }
 
 // upstreamTLS is the client configuration for the session with bridge.
@@ -125,6 +107,10 @@ func (p *mailProxy) handle(ctx context.Context, client net.Conn) {
 	defer func() { _ = client.Close() }()
 
 	addr, implicit := p.upstream()
+	if p.active != nil && !p.active() {
+		forward(ctx, p.name, client, addr, false)
+		return
+	}
 	dialer := net.Dialer{Timeout: 5 * time.Second}
 	up, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {

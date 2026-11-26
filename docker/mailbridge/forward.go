@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -10,19 +11,16 @@ import (
 	"time"
 )
 
-// startForwarder accepts connections on addr and pipes them to the address
-// returned by target. Bridge binds its IMAP and SMTP servers to 127.0.0.1 only,
-// so this is what makes them reachable from the LAN. The bytes are passed
-// through untouched: STARTTLS/TLS is still negotiated end-to-end with bridge.
-//
-// With proxyHeader, a PROXY protocol v1 line is sent first so the target (Dovecot)
-// knows the real client address for its logs and brute-force throttling.
-func startForwarder(ctx context.Context, wg *sync.WaitGroup, name, addr string, target func() string, proxyHeader bool) {
+// A handler serves one connection from a mail client.
+type handler func(ctx context.Context, conn net.Conn)
+
+// listen accepts connections on addr and hands each to handle, until the
+// listener it returns is closed or ctx is cancelled.
+func listen(ctx context.Context, wg *sync.WaitGroup, name, addr string, handle handler) (net.Listener, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		log.Fatalf("cannot listen for %s on %s: %v", name, addr, err)
+		return nil, err
 	}
-	log.Printf("forwarding %s: %s -> %s", name, ln.Addr(), target())
 
 	wg.Add(1)
 	go func() {
@@ -35,16 +33,37 @@ func startForwarder(ctx context.Context, wg *sync.WaitGroup, name, addr string, 
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
-				if ctx.Err() != nil {
+				if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 					return
 				}
 				log.Printf("%s accept failed: %v", name, err)
 				time.Sleep(200 * time.Millisecond)
 				continue
 			}
-			go forward(ctx, name, conn, target(), proxyHeader)
+			go handle(ctx, conn)
 		}
 	}()
+	return ln, nil
+}
+
+// forwarder pipes connections to the address returned by target. Bridge binds
+// its IMAP and SMTP servers to 127.0.0.1 only, so this is what makes them
+// reachable from the LAN. The bytes are passed through untouched: STARTTLS/TLS
+// is still negotiated end-to-end with the target.
+//
+// With proxyHeader, a PROXY protocol v1 line is sent first so the target (Dovecot)
+// knows the real client address for its logs and brute-force throttling.
+func forwarder(name string, target func() string, proxyHeader bool) handler {
+	return func(ctx context.Context, conn net.Conn) { forward(ctx, name, conn, target(), proxyHeader) }
+}
+
+// startForwarder forwards the connections arriving on addr.
+func startForwarder(ctx context.Context, wg *sync.WaitGroup, name, addr string, target func() string, proxyHeader bool) {
+	ln, err := listen(ctx, wg, name, addr, forwarder(name, target, proxyHeader))
+	if err != nil {
+		log.Fatalf("cannot listen for %s on %s: %v", name, addr, err)
+	}
+	log.Printf("forwarding %s: %s -> %s", name, ln.Addr(), target())
 }
 
 // proxyLine builds the PROXY protocol v1 header describing a client connection.

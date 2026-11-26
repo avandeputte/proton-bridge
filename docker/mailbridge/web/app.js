@@ -27,8 +27,12 @@ class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 
+// Where the browser sees this page. Behind a reverse proxy only the browser
+// knows, and the container needs it to set the session cookie for the right path.
+const pagePath = new URL('.', location.href).pathname;
+
 async function api(method, path, body) {
-  const opts = { method, headers: { 'X-Mailbridge': '1' }, credentials: 'same-origin' };
+  const opts = { method, headers: { 'X-Mailbridge': pagePath }, credentials: 'same-origin' };
   if (body !== undefined) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
@@ -154,7 +158,8 @@ function render() {
   if (changed('accounts', [state.users, state.settings, state.connection, [...revealed], state.dovecot, syncView()])) renderAccounts();
   if (changed('login', [state.login, state.status])) renderLogin();
   if (changed('settings', [state.settings, state.status, state.dovecot])) renderSettings();
-  if (changed('cert', [state.certificate, state.mailCertificate, state.acme, state.dovecot])) renderCertificate();
+  if (changed('ports', [state.ports, state.portDefaults, state.public, state.publicDefaults, state.dovecot])) renderPorts();
+  if (changed('cert', [state.certificate, state.mailCertificate, state.acme, state.acmeLocked, state.dovecot, state.publicURL])) renderCertificate();
   if (changed('password', state.canChangePassword)) renderPassword();
 }
 
@@ -203,8 +208,9 @@ function renderCertificate() {
   if (state.dovecot || state.mailCertificate) users.push('IMAP');
   if (state.mailCertificate) users.push('SMTP');
   const list = users.length > 1 ? users.slice(0, -1).join(', ') + ' and ' + users[users.length - 1] : users[0];
-  const who = users.length ? list[0].toUpperCase() + list.slice(1) + (users.length > 1 ? ' present' : ' presents') +
-    ' this certificate. ' : 'This page is served without encryption. ';
+  const plain = state.publicURL ? 'This page is served through ' + state.publicURL + '. ' : 'This page is served without encryption. ';
+  const who = (users.length ? list[0].toUpperCase() + list.slice(1) + (users.length > 1 ? ' present' : ' presents') +
+    ' this certificate. ' : '') + (state.webTLS ? '' : plain);
   let note;
   if (state.mailCertificate && selfSigned) {
     note = who + 'Browsers and mail clients will ask you to accept it.';
@@ -221,6 +227,184 @@ function renderCertificate() {
 
   $('certificate').replaceChildren(...lines);
   $('btn-cert').hidden = state.mailCertificate;
+
+  // --- Let's Encrypt set-up ---
+  const actions = $('acme-actions');
+  actions.replaceChildren();
+  if (state.acmeLocked === 'environment') {
+    actions.append(h('span', { class: 'muted small' },
+      'Let\'s Encrypt is set up with the MAILBRIDGE_ACME_ variables of the container. Change it there.'));
+  } else if (state.acmeLocked === 'certificate') {
+    actions.append(h('span', { class: 'muted small' },
+      'The certificate comes from the files in MAILBRIDGE_TLS_CERT and MAILBRIDGE_TLS_KEY. Remove those to use Let\'s Encrypt.'));
+  } else {
+    actions.append(h('button', { type: 'button', onclick: openAcmeForm },
+      acme ? 'Change Let\'s Encrypt settings' : 'Get a certificate from Let\'s Encrypt'));
+  }
+  if (acme && acme.state === 'error') {
+    actions.append(h('button', { type: 'button',
+      onclick: (e) => act(e.target, () => api('POST', 'api/acme/retry'), 'Trying again') }, 'Try again now'));
+  }
+}
+
+// The form is filled once when it opens, and not touched by the refreshes of
+// the page after that: someone is typing in it.
+async function openAcmeForm() {
+  const box = $('acme-form');
+  let cfg;
+  try {
+    cfg = await api('GET', 'api/acme');
+  } catch (e) {
+    if (e.status === 401) showSignIn(); else toast(e.message);
+    return;
+  }
+
+  const [dLabel, dInput] = field('Domain name', { type: 'text', required: true, placeholder: 'mail.example.com',
+    value: cfg.domains.join(', '), autocomplete: 'off', autocapitalize: 'none', spellcheck: 'false' });
+  dLabel.append(h('span', { class: 'hint' }, 'The name your devices use for this server. It has to be in a domain you own. ' +
+    'Several names separated by commas work, and so do wildcards such as *.example.com.'));
+
+  const [pLabel, pInput] = field('DNS provider of the domain', { type: 'text', required: true, list: 'acme-providers',
+    placeholder: 'cloudflare', value: cfg.dns, autocomplete: 'off', autocapitalize: 'none', spellcheck: 'false' });
+  pLabel.append(h('datalist', { id: 'acme-providers' }, cfg.providers.map((c) => h('option', { value: c }))),
+    h('span', { class: 'hint' }, 'The company that hosts the DNS records of the domain. Start typing to search ' +
+      (cfg.providers.length || 'the') + ' supported providers.'));
+
+  // What was typed or forgotten, by variable name, so that it survives
+  // switching back and forth between providers.
+  const typed = {};
+  const forgotten = new Set();
+  // Whether to hide a value while it is typed: credentials unless they are
+  // plainly not secret, the other settings only if they sound like one.
+  const secretName = /PASS|SECRET|TOKEN|KEY|CREDENTIAL|HMAC/;
+  const plainName = /EMAIL|REGION|ENDPOINT|URL|USER|MODE|ZONE_ID|HOST|PROFILE|_ID$/;
+  const provBox = h('div', { class: 'acme-provider' });
+  let loaded = '';
+
+  const variable = (v, secret) => {
+    const isSet = cfg.set.includes(v.name) && pInput.value.trim() === cfg.dns && !forgotten.has(v.name);
+    const input = h('input', { type: secret ? 'password' : 'text', autocomplete: secret ? 'new-password' : 'off',
+      autocapitalize: 'none', spellcheck: 'false', value: typed[v.name] || '',
+      placeholder: isSet ? 'saved, leave empty to keep it' : '' });
+    input.addEventListener('input', () => { typed[v.name] = input.value; });
+    const label = h('label', {}, h('code', {}, v.name), input, h('span', { class: 'hint' }, v.description,
+      isSet ? [' ', h('button', { class: 'link small', type: 'button', onclick: () => { forgotten.add(v.name); showProvider(true); } },
+        'Forget the saved value')] : null));
+    return label;
+  };
+
+  async function showProvider(again) {
+    const code = pInput.value.trim().toLowerCase();
+    if (code === loaded && !again) return;
+    loaded = code;
+    if (!code) { provBox.replaceChildren(); return; }
+    let info;
+    try {
+      info = await api('GET', 'api/acme/providers/' + encodeURIComponent(code));
+    } catch (e) {
+      if (loaded === code) provBox.replaceChildren(h('p', { class: 'small error' }, e.message));
+      return;
+    }
+    if (loaded !== code) return; // the user typed on meanwhile
+    provBox.replaceChildren(...[
+      h('p', { class: 'small' }, h('strong', {}, info.name), ': fill in what the provider gave you. Most need just one ' +
+        'API token, and the rest stays empty. ',
+        info.url ? h('a', { href: info.url, target: '_blank', rel: 'noopener noreferrer' }, 'What each one means') : null),
+      // Several providers know their credentials by a second name as well. One is enough here.
+      ...info.credentials.filter((v) => !/^Alias (to|of) /i.test(v.description) || cfg.set.includes(v.name))
+        .map((v) => variable(v, !plainName.test(v.name))),
+      info.options.length ? h('details', {}, h('summary', {}, 'More settings of this provider'),
+        info.options.map((v) => variable(v, secretName.test(v.name)))) : null,
+    ].filter(Boolean));
+  }
+  pInput.addEventListener('change', () => showProvider(false));
+  pInput.addEventListener('blur', () => showProvider(false));
+
+  const [eLabel, eInput] = field('Contact address (optional)', { type: 'email', value: cfg.email, autocomplete: 'off',
+    placeholder: 'you@example.com' });
+  eLabel.append(h('span', { class: 'hint' }, 'Registered with the Let\'s Encrypt account.'));
+
+  const stagingId = 'acme-staging';
+  const staging = h('input', { type: 'checkbox', id: stagingId, checked: !!cfg.staging });
+  const stagingRow = h('div', { class: 'setting' }, staging, h('label', { for: stagingId }, 'Test mode',
+    h('span', { class: 'muted' }, 'Gets a test certificate, which browsers and mail clients do not trust, from Let\'s Encrypt\'s ' +
+      'staging server. Use it until everything works: the real server only allows a few failed attempts per hour.')));
+
+  const [rLabel, rInput] = field('DNS resolver', { type: 'text', value: cfg.resolvers.join(', '), placeholder: '1.1.1.1:53',
+    autocomplete: 'off', autocapitalize: 'none', spellcheck: 'false' });
+  rLabel.append(h('span', { class: 'hint' }, 'Only needed when the DNS server of your network answers for the whole domain ' +
+    'itself, which hides the real name servers.'));
+
+  const close = () => { box.hidden = true; box.replaceChildren(); };
+  const split = (v) => v.split(/[\s,]+/).filter(Boolean);
+  const save = h('button', { class: 'primary', type: 'submit' }, 'Save and request the certificate');
+  const form = h('form', { onsubmit: (e) => {
+    e.preventDefault();
+    const sameProvider = pInput.value.trim().toLowerCase() === cfg.dns;
+    const variables = {};
+    for (const [name, value] of Object.entries(typed)) if (value) variables[name] = value;
+    act(save, async () => {
+      await api('POST', 'api/acme', {
+        domains: split(dInput.value), dns: pInput.value.trim().toLowerCase(), email: eInput.value.trim(),
+        staging: staging.checked, resolvers: split(rInput.value), variables,
+        keep: sameProvider ? cfg.set.filter((n) => !forgotten.has(n) && !variables[n]) : [],
+      });
+      close();
+    }, 'Saved. Requesting the certificate.');
+  } }, dLabel, pLabel, provBox, eLabel, stagingRow, h('details', {}, h('summary', {}, 'Advanced'), rLabel),
+    h('div', { class: 'row' }, save,
+      cfg.domains.length ? h('button', { class: 'danger', type: 'button', onclick: (e) => {
+        if (!confirm('Stop using Let\'s Encrypt and go back to the self-signed certificate?')) return;
+        act(e.target, async () => { await api('DELETE', 'api/acme'); close(); }, 'Let\'s Encrypt is turned off');
+      } }, 'Turn off Let\'s Encrypt') : null,
+      h('button', { type: 'button', onclick: close }, 'Cancel')));
+
+  box.replaceChildren(form);
+  box.hidden = false;
+  showProvider(false);
+  dInput.focus();
+}
+
+function renderPorts() {
+  const p = state.ports, d = state.portDefaults, pub = state.public, pd = state.publicDefaults;
+  const listen = {}, shown = {};
+  const port = (into, key, label, value, placeholder) => {
+    into[key] = h('input', { type: 'number', min: '1', max: '65535', inputmode: 'numeric',
+      value: value ? String(value) : '', placeholder: placeholder || 'off' });
+    return h('label', {}, label, into[key]);
+  };
+  const url = h('input', { type: 'url', class: 'wide', value: pub.url || '', autocomplete: 'off', spellcheck: 'false',
+    placeholder: pd.url || 'https://mail.example.com' });
+  const host = h('input', { type: 'text', class: 'wide', value: pub.host || '', autocomplete: 'off', spellcheck: 'false',
+    autocapitalize: 'none', placeholder: pd.host });
+  const save = h('button', { type: 'submit' }, 'Save ports and addresses');
+  const form = h('form', { class: 'ports', onsubmit: (e) => {
+    e.preventDefault();
+    const body = { ports: {}, public: { url: url.value.trim(), host: host.value.trim() } };
+    for (const [key, input] of Object.entries(listen)) body.ports[key] = input.value ? Number(input.value) : 0;
+    for (const [key, input] of Object.entries(shown)) body.public[key] = input.value ? Number(input.value) : 0;
+    act(save, () => api('POST', 'api/addresses', body), 'Ports and addresses saved');
+  } },
+    h('h3', {}, 'Ports this container listens on'),
+    h('div', { class: 'row' }, port(listen, 'imap', 'IMAP', p.imap, d.imap),
+      state.dovecot ? port(listen, 'imaps', 'IMAP with SSL/TLS', p.imaps, d.imaps) : null,
+      port(listen, 'smtp', 'SMTP', p.smtp, d.smtp)),
+    h('p', { class: 'muted small' }, 'Leave a field empty for the port shown in grey. A port set here is opened in addition ' +
+      'to that one. If Docker publishes the container\'s ports, publish the new one too, for example "2143:2143".'),
+    h('h3', {}, 'Addresses that browsers and mail clients use'),
+    h('p', { class: 'muted small' }, 'Fill these in when they differ from where the container listens: behind a reverse ' +
+      'proxy, behind a TCP proxy for IMAP and SMTP, or with ports published under other numbers. They are what this page ' +
+      'shows and what goes into profiles. Setting them opens no port.'),
+    h('label', {}, 'Address of this page', url,
+      h('span', { class: 'hint' }, 'The address of the reverse proxy, with the path if there is one, such as ' +
+        'https://example.com/mailbridge. The page keeps working at the container\'s own address.')),
+    h('label', {}, 'Mail server name', host,
+      h('span', { class: 'hint' }, 'The name mail clients connect to. Empty uses the name in grey.')),
+    h('div', { class: 'row' }, port(shown, 'imap', 'IMAP port', pub.imap, pd.imap),
+      state.dovecot ? port(shown, 'imaps', 'IMAP with SSL/TLS port', pub.imaps, pd.imaps) : null,
+      port(shown, 'smtp', 'SMTP port', pub.smtp, pd.smtp)),
+    h('div', { class: 'row' }, save));
+  $('ports').replaceChildren(form);
 }
 
 function renderNotices() {
@@ -363,6 +547,11 @@ function accountCard(u) {
     }
     actions.append(h('button', { type: 'button',
       onclick: (e) => act(e.target, () => api('POST', 'api/users/' + encodeURIComponent(u.id) + '/logout')) }, 'Sign out'));
+  }
+  if (u.state === 'connected') {
+    actions.append(h('a', { class: 'button', href: 'api/users/' + encodeURIComponent(u.id) + '/profile', download: '',
+      title: 'A configuration profile that sets this account up in Mail on iPhone, iPad and Mac. It contains the password above.' },
+      'Profile for iPhone, iPad and Mac'));
   }
   actions.append(h('button', { class: 'danger', type: 'button',
     onclick: (e) => {

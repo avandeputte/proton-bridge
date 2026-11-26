@@ -17,6 +17,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -47,6 +48,9 @@ type CertInfo struct {
 type CertStore struct {
 	certPath, keyPath string
 
+	// What to go back to when a Let's Encrypt certificate is given up.
+	fallbackCert, fallbackKey, fallbackOrigin string
+
 	mu       sync.RWMutex
 	cert     *tls.Certificate
 	info     CertInfo
@@ -66,6 +70,7 @@ func NewCertStore(cfg Config) (*CertStore, error) {
 		if err := s.Load(cfg.TLSCert, cfg.TLSKey, certOwn); err != nil {
 			return nil, fmt.Errorf("cannot use MAILBRIDGE_TLS_CERT and MAILBRIDGE_TLS_KEY: %w", err)
 		}
+		s.fallbackCert, s.fallbackKey, s.fallbackOrigin = cfg.TLSCert, cfg.TLSKey, certOwn
 		return s, nil
 	}
 
@@ -73,7 +78,32 @@ func NewCertStore(cfg Config) (*CertStore, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.fallbackCert, s.fallbackKey, s.fallbackOrigin = certPath, keyPath, certSelfSigned
 	return s, s.Load(certPath, keyPath, certSelfSigned)
+}
+
+// Fallback goes back to the certificate the store started with.
+func (s *CertStore) Fallback() error {
+	return s.Load(s.fallbackCert, s.fallbackKey, s.fallbackOrigin)
+}
+
+// Trusted says whether the certificate in use is one that mail clients can
+// be expected to accept without asking: anything but the self-signed one.
+func (s *CertStore) Trusted() bool { return s.Info().Origin != certSelfSigned }
+
+// Hostname is the first name of a trusted certificate that a mail client can
+// connect by, or empty.
+func (s *CertStore) Hostname() string {
+	info := s.Info()
+	if info.Origin == certSelfSigned {
+		return ""
+	}
+	for _, name := range info.Names {
+		if !strings.HasPrefix(name, "*.") && net.ParseIP(name) == nil {
+			return name
+		}
+	}
+	return ""
 }
 
 // Load switches to the certificate and key in the given files. Nothing changes

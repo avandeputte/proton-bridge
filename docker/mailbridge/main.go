@@ -10,6 +10,7 @@ import (
 	"context"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -32,9 +33,12 @@ type Config struct {
 	IMAPPort   string // port shown to the user (the one published on the host)
 	SMTPPort   string
 	Hostname   string // host name shown to the user, empty = whatever the browser used
-	DataDir    string
-	BridgeBin  string
-	LogLevel   string
+	// PublicURL is where browsers find the web UI when it is not reached
+	// directly: the address of the reverse proxy in front of it.
+	PublicURL *url.URL
+	DataDir   string
+	BridgeBin string
+	LogLevel  string
 
 	// Dovecot mode: mail clients talk to a bundled Dovecot, which is kept in
 	// two-way sync with bridge.
@@ -57,12 +61,6 @@ type Config struct {
 	ACMEResolvers []string
 	ACMEArgs      []string // further options for lego
 	ACMEBin       string
-}
-
-// ManagedCert says whether there is a certificate that mail clients can be
-// expected to trust: the user's own, or one from Let's Encrypt.
-func (c Config) ManagedCert() bool {
-	return len(c.ACMEDomains) > 0 || c.TLSCert != ""
 }
 
 func envBool(key string, def bool) bool {
@@ -185,10 +183,13 @@ func loadConfig() Config {
 		if !validDomain(d) {
 			log.Fatalf("MAILBRIDGE_ACME_DOMAINS: %q is not a domain name", d)
 		}
-		// The name mail clients are told to use, unless set explicitly.
-		if c.Hostname == "" && !strings.HasPrefix(d, "*.") {
-			c.Hostname = d
+	}
+	if raw := env("MAILBRIDGE_PUBLIC_URL", ""); raw != "" {
+		u, err := parsePublicURL(raw)
+		if err != nil {
+			log.Fatalf("MAILBRIDGE_PUBLIC_URL: %v", err)
 		}
+		c.PublicURL = u
 	}
 	c.IMAPPort = env("MAILBRIDGE_IMAP_PORT", portOf(c.IMAPListen, "143"))
 	c.SMTPPort = env("MAILBRIDGE_SMTP_PORT", portOf(c.SMTPListen, "587"))
@@ -256,28 +257,19 @@ func main() {
 
 	run(bridge.Run)
 
-	var acme *ACME
-	switch {
-	case len(cfg.ACMEDomains) > 0:
-		acme = NewACME(cfg, certs)
-		acme.UseStored()
-		run(acme.Run)
-	case cfg.TLSCert != "":
+	acme := NewACME(cfg, certs)
+	acme.UseStored()
+	run(acme.Run)
+	if cfg.TLSCert != "" {
 		// certbot, acme.sh and the like renew the files in place.
 		run(func(ctx context.Context) { certs.Watch(ctx, cfg.TLSCert, cfg.TLSKey, certOwn) })
 	}
 
-	// Bridge always presents its own self-signed certificate. With a
-	// certificate that mail clients trust, mailbridge answers them itself.
-	mail := func(name, proto string, addrs []string, target func() string, endpoint func() (string, bool)) {
-		for _, addr := range addrs {
-			if cfg.ManagedCert() {
-				startMailProxy(ctx, &wg, &mailProxy{name: name, proto: proto, certs: certs, upstream: endpoint, pinned: bridge.TLSCertificate}, addr)
-			} else {
-				startForwarder(ctx, &wg, name, addr, target, false)
-			}
-		}
-	}
+	// Bridge always presents its own self-signed certificate. While there is
+	// a certificate that mail clients trust, mailbridge answers them itself.
+	ports := NewPorts(ctx, &wg, cfg)
+	smtp := &mailProxy{name: "SMTP", proto: "smtp", certs: certs, upstream: bridge.SMTPEndpoint, pinned: bridge.TLSCertificate, active: certs.Trusted}
+	ports.Handle(svcSMTP, smtp.handle)
 
 	var syncer *SyncManager
 	if cfg.DovecotMode {
@@ -292,24 +284,24 @@ func main() {
 		run(dovecot.Run)
 		run(syncer.Run)
 
-		for _, addr := range cfg.IMAPListen {
-			startForwarder(ctx, &wg, "IMAP", addr, func() string { return dovecotIMAPAddr }, true)
-		}
-		for _, addr := range cfg.IMAPSListen {
-			startForwarder(ctx, &wg, "IMAPS", addr, func() string { return dovecotIMAPSAddr }, true)
-		}
+		ports.Handle(svcIMAP, forwarder("IMAP", func() string { return dovecotIMAPAddr }, true))
+		ports.Handle(svcIMAPS, forwarder("IMAPS", func() string { return dovecotIMAPSAddr }, true))
 	} else {
 		if len(cfg.IMAPSListen) > 0 {
 			log.Fatal("MAILBRIDGE_IMAPS_LISTEN needs MAILBRIDGE_DOVECOT=on; without Dovecot, switch IMAP to SSL/TLS in the web UI instead")
 		}
-		mail("IMAP", "imap", cfg.IMAPListen, bridge.IMAPTarget, func() (string, bool) {
-			host, port, ssl := bridge.IMAPEndpoint()
-			return net.JoinHostPort(host, strconv.Itoa(port)), ssl
-		})
+		imap := &mailProxy{name: "IMAP", proto: "imap", certs: certs, pinned: bridge.TLSCertificate, active: certs.Trusted,
+			upstream: func() (string, bool) {
+				host, port, ssl := bridge.IMAPEndpoint()
+				return net.JoinHostPort(host, strconv.Itoa(port)), ssl
+			}}
+		ports.Handle(svcIMAP, imap.handle)
 	}
-	mail("SMTP", "smtp", cfg.SMTPListen, bridge.SMTPTarget, bridge.SMTPEndpoint)
+	for _, problem := range ports.Start() {
+		bridge.notify("error", "%s", problem)
+	}
 
-	if err := serveWeb(ctx, cfg, auth, bridge, syncer, certs, acme); err != nil {
+	if err := serveWeb(ctx, &server{cfg: cfg, auth: auth, bridge: bridge, syncer: syncer, certs: certs, acme: acme, ports: ports, public: NewPublic(cfg)}); err != nil {
 		log.Printf("web server stopped: %v", err)
 		stop()
 	}

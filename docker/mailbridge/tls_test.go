@@ -338,6 +338,14 @@ func (c *mailClient) startTLS(trustedCertPath, name string) {
 // a certificate for mail.example; bridge has its own.
 func mailSetup(t *testing.T, proto string, implicit bool, pin func(bridgeCertPath string) ([]byte, error)) (proxyAddr, trusted string, upstream *fakeMail) {
 	t.Helper()
+	proxyAddr, trusted, _, upstream = mailSetupWhen(t, proto, implicit, pin, nil)
+	return proxyAddr, trusted, upstream
+}
+
+// mailSetupWhen is mailSetup with a proxy that only answers for itself
+// while active says so.
+func mailSetupWhen(t *testing.T, proto string, implicit bool, pin func(bridgeCertPath string) ([]byte, error), active func() bool) (proxyAddr, trusted, bridgeCert string, upstream *fakeMail) {
+	t.Helper()
 	bridgeCert, bridgeKey := testCert(t, "bridge.internal")
 	pair, err := tls.LoadX509KeyPair(bridgeCert, bridgeKey)
 	if err != nil {
@@ -367,12 +375,50 @@ func mailSetup(t *testing.T, proto string, implicit bool, pin func(bridgeCertPat
 		name: strings.ToUpper(proto), proto: proto, certs: store,
 		upstream: func() (string, bool) { return upstream.addr, implicit },
 		pinned:   func() ([]byte, error) { return pin(bridgeCert) },
+		active:   active,
 	}, proxyAddr)
 	t.Cleanup(func() {
 		cancel()
 		wg.Wait()
 	})
-	return proxyAddr, trusted, upstream
+	return proxyAddr, trusted, bridgeCert, upstream
+}
+
+// Without a certificate that clients trust there is nothing to gain from
+// answering in bridge's place: the session is passed on as it is, and the
+// client sees bridge's own certificate, as it did before there was a proxy.
+func TestMailProxyStandsAsideWithoutCertificate(t *testing.T) {
+	var active atomic.Bool
+	addr, trusted, bridgeCert, upstream := mailSetupWhen(t, "smtp", false, nil, active.Load)
+
+	c := dialMail(t, addr)
+	c.expect("220 ")
+	c.send("EHLO client.example")
+	c.expect("250 ")
+	c.send("STARTTLS")
+	c.expect("220 ")
+	c.startTLS(bridgeCert, "bridge.internal")
+	c.send("EHLO client.example")
+	c.expect("250 ")
+	c.send("AUTH PLAIN AHVzZXIAcGFzcw==")
+	c.expect("235 ")
+	c.send("QUIT")
+	c.expect("221 ")
+	if !upstream.sawLine("AUTH PLAIN AHVzZXIAcGFzcw==") {
+		t.Fatalf("the session did not reach bridge intact: %q", upstream.seen)
+	}
+
+	// Once there is a certificate, new sessions get it. No restart needed.
+	active.Store(true)
+	c = dialMail(t, addr)
+	c.expect("220 ")
+	c.send("EHLO client.example")
+	c.expect("250 ")
+	c.send("STARTTLS")
+	c.expect("220 ")
+	c.startTLS(trusted, "mail.example")
+	c.send("QUIT")
+	c.expect("221 ")
 }
 
 func TestMailProxySMTP(t *testing.T) {
@@ -477,7 +523,25 @@ func TestMailProxyPinsBridge(t *testing.T) {
 // fakeLego stands in for the lego command: it logs how it was called and, if
 // told to succeed, delivers the certificate from $FAKE_CERT and $FAKE_KEY.
 const fakeLego = `#!/bin/sh
+case " $* " in
+  *" dnshelp -c fake "*)
+    echo "Configuration for Fake DNS."
+    echo "Code:   'fake'"
+    echo
+    echo "Credentials:"
+    echo '  - "FAKE_TOKEN":  API token'
+    echo '  - "FAKE_USER":   Account name'
+    echo
+    echo "Additional Configuration:"
+    echo '  - "FAKE_TTL":  The TTL of the TXT record (Default: 120)'
+    echo
+    echo "More information: https://example.org/dns/fake"
+    exit 0 ;;
+  *" dnshelp -c "*) echo '"that" is not yet supported' >&2; exit 1 ;;
+  *" dnshelp "*) printf 'Supported DNS providers:\n  exec, fake, manual, other\n\nMore information: https://example.org/dns\n'; exit 0 ;;
+esac
 echo "$@" >> "$FAKE_LOG"
+echo "token=$FAKE_TOKEN ttl=$FAKE_TTL password=$MAILBRIDGE_PASSWORD" >> "$FAKE_LOG.env"
 while [ $# -gt 1 ]; do
   case "$1" in
     --path) path="$2" ;;
@@ -496,6 +560,11 @@ name=$(echo "$domain" | sed 's/\*/_/')
 cp "$FAKE_KEY" "$path/certificates/$name.key"
 cp "$FAKE_CERT" "$path/certificates/$name.crt"
 `
+
+func acmeState(a *ACME) string {
+	st, _ := a.Status()
+	return st.State
+}
 
 func TestACME(t *testing.T) {
 	dir := t.TempDir()
@@ -545,8 +614,8 @@ func TestACME(t *testing.T) {
 		close(done)
 	}()
 
-	waitFor(t, "the failure to be reported", func() bool { return acme.Status().State == "error" })
-	st := acme.Status()
+	waitFor(t, "the failure to be reported", func() bool { return acmeState(acme) == "error" })
+	st, _ := acme.Status()
 	if !strings.Contains(st.Message, "the DNS provider said no") || st.Next.IsZero() {
 		t.Fatalf("unexpected status after a failure: %+v", st)
 	}
@@ -557,7 +626,7 @@ func TestACME(t *testing.T) {
 	if err := os.Remove(failPath); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "the certificate", func() bool { return acme.Status().State == "ok" })
+	waitFor(t, "the certificate", func() bool { return acmeState(acme) == "ok" })
 	if info := store.Info(); info.Origin != certLetsEncrypt || !hasName(info, "mail.example") {
 		t.Fatalf("unexpected certificate: %+v", info)
 	}
@@ -602,7 +671,7 @@ func TestACME(t *testing.T) {
 		acme.Run(ctx)
 		close(done)
 	}()
-	waitFor(t, "the renewal", func() bool { return acme.Status().State == "ok" })
+	waitFor(t, "the renewal", func() bool { return acmeState(acme) == "ok" })
 	renewed, _ := store.GetCertificate(nil)
 	if bytes.Equal(renewed.Certificate[0], first.Certificate[0]) {
 		t.Fatal("the renewed certificate was not put to use")
@@ -620,7 +689,7 @@ func TestACME(t *testing.T) {
 
 	// --- another certificate authority starts from scratch ---
 	cfg.ACMEServer = acmeProduction
-	if NewACME(cfg, store).have() {
+	if other := NewACME(cfg, store); other.have(other.Settings()) {
 		t.Fatal("the staging certificate was taken for a production one")
 	}
 }

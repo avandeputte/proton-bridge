@@ -34,8 +34,14 @@ services:
       # keeps a second copy of the mail in the volume. See docker/README.md.
       # MAILBRIDGE_DOVECOT: "on"
       # MAILBRIDGE_IMAPS_LISTEN: ":993"
+      # Behind a reverse proxy: the address the proxy serves the web UI at. This, and
+      # the server name and ports of a TCP proxy in front of IMAP and SMTP, can also be
+      # entered in the web UI under Settings. See docker/README.md.
+      # MAILBRIDGE_PUBLIC_URL: "https://example.com/mailbridge"
       # A Let's Encrypt certificate for the web UI, IMAP and SMTP, fetched and renewed
-      # by the container through your DNS provider's API. See docker/README.md.
+      # by the container through your DNS provider's API. It can also be set up in the
+      # web UI, in the Certificate card; set here, the form there is switched off.
+      # See docker/README.md.
       # MAILBRIDGE_ACME_DOMAINS: "mail.example.com"
       # MAILBRIDGE_ACME_DNS: "cloudflare"
       # CLOUDFLARE_DNS_API_TOKEN: "your-token"
