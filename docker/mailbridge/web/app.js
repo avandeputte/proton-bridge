@@ -480,7 +480,6 @@ function syncBlock(login, showLogin) {
 }
 
 function accountCard(u) {
-  const s = state.settings;
   const c = state.connection;
   const pillClass = u.state === 'connected' ? 'ok' : (u.state === 'locked' ? 'warn' : 'err');
   const pillText = u.state === 'connected' ? (u.syncing ? 'synchronising' : 'connected')
@@ -504,14 +503,15 @@ function accountCard(u) {
     const shown = revealed.has(u.id);
     const logins = u.splitMode ? u.addresses : u.addresses.slice(0, 1);
     const copyBtn = (text) => h('button', { class: 'mini', type: 'button', onclick: () => copyText(text) }, 'Copy');
+    // Every mail port takes both, so neither setting in a mail client is wrong.
+    const either = 'STARTTLS or SSL/TLS';
 
     card.append(h('div', { class: 'table-wrap' }, h('table', {},
       h('tr', {}, h('th', {}, 'IMAP server'),
-        h('td', {}, h('code', {}, c.host), ' port ', h('code', {}, c.imapPort), ' · ',
-          (state.dovecot ? false : s.imapSSL) ? 'SSL/TLS' : 'STARTTLS',
-          (state.dovecot && c.imapsPort) ? [', or port ', h('code', {}, c.imapsPort), ' · SSL/TLS'] : null)),
+        h('td', {}, h('code', {}, c.host), ' port ', h('code', {}, c.imapPort),
+          (state.dovecot && c.imapsPort) ? [' or ', h('code', {}, c.imapsPort)] : null, ' · ', either)),
       h('tr', {}, h('th', {}, 'SMTP server'),
-        h('td', {}, h('code', {}, c.host), ' port ', h('code', {}, c.smtpPort), ' · ', s.smtpSSL ? 'SSL/TLS' : 'STARTTLS')),
+        h('td', {}, h('code', {}, c.host), ' port ', h('code', {}, c.smtpPort), ' · ', either)),
       h('tr', {}, h('th', {}, u.splitMode ? 'Usernames' : 'Username'),
         h('td', {}, logins.map((a) => h('div', { class: 'row' }, h('code', {}, a), copyBtn(a))))),
       h('tr', {}, h('th', {}, 'Password'),
@@ -664,13 +664,10 @@ function renderSettings() {
     return h('div', { class: 'setting' }, input,
       h('label', { for: id }, title, h('span', { class: 'muted' }, help)));
   };
-  const reconf = 'Mail clients must be reconfigured to match after this change. Continue?';
+  // Bridge's own choice between STARTTLS and SSL/TLS is not offered here:
+  // the mail ports of the container take both, whatever bridge is set to.
   box.replaceChildren(...[
     // In Dovecot mode mail clients talk IMAP to Dovecot, not to bridge.
-    state.dovecot ? null : toggle('imapSSL', 'IMAP: use SSL/TLS instead of STARTTLS',
-      'Leave off unless your mail client cannot do STARTTLS. Both are encrypted.', reconf),
-    toggle('smtpSSL', 'SMTP: use SSL/TLS instead of STARTTLS',
-      'Leave off unless your mail client cannot do STARTTLS. Both are encrypted.', reconf),
     state.dovecot ? null : toggle('allMailVisible', 'Show the "All Mail" folder',
       'Turn off if your mail client downloads every message twice.'),
     toggle('telemetryDisabled', 'Disable usage statistics',

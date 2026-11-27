@@ -41,6 +41,8 @@ type Dovecot struct {
 	confPath   string
 	passwdPath string
 	baseDir    string // runtime sockets, must be a short path
+	// onLog sees every line Dovecot logs. May be nil.
+	onLog func(line string)
 }
 
 func NewDovecot(cfg Config, certs *CertStore) *Dovecot {
@@ -201,6 +203,9 @@ func (d *Dovecot) Run(ctx context.Context) {
 			scanner := bufio.NewScanner(pr)
 			for scanner.Scan() {
 				fmt.Fprintln(os.Stdout, "[dovecot] "+scanner.Text())
+				if d.onLog != nil {
+					d.onLog(scanner.Text())
+				}
 			}
 		}()
 

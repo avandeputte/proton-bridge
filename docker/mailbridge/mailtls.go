@@ -27,10 +27,13 @@ import (
 // from here to bridge on loopback, and the decrypted bytes are copied between
 // the two.
 //
-// The LAN side works the way bridge is set to work: STARTTLS by default,
-// TLS from the first byte when the protocol is switched to SSL/TLS in the web
-// UI. For STARTTLS the proxy has to follow the conversation up to that
-// command, which is the only protocol knowledge in here.
+// The LAN side takes both kinds of client, whichever of the two bridge is
+// set to expect (STARTTLS by default, TLS from the first byte with the
+// protocol switched to SSL/TLS in the web UI). A client that waits for the
+// greeting and asks for STARTTLS is followed up to that command. A client
+// that starts TLS from the first byte is answered right away. Where client
+// and bridge differ, the proxy plays the missing part towards each. That is
+// all the protocol knowledge in here.
 type mailProxy struct {
 	name     string // for the log: "IMAP" or "SMTP"
 	proto    string // "imap" or "smtp"
@@ -43,6 +46,8 @@ type mailProxy struct {
 	// there is not, sessions are forwarded untouched and bridge presents
 	// its own. Nil means always.
 	active func() bool
+	// trouble is told when a mail client turns the certificate down. May be nil.
+	trouble func(service, remote, how string)
 
 	mu        sync.Mutex
 	pinnedDER []byte
@@ -106,8 +111,11 @@ func (p *mailProxy) forgetPinned() {
 func (p *mailProxy) handle(ctx context.Context, client net.Conn) {
 	defer func() { _ = client.Close() }()
 
+	client, clientTLS := startsWithTLS(client)
 	addr, implicit := p.upstream()
-	if p.active != nil && !p.active() {
+	// Without a certificate that clients trust, bridge may as well answer
+	// with its own, as long as it speaks the way the client does.
+	if p.active != nil && !p.active() && clientTLS == implicit {
 		forward(ctx, p.name, client, addr, false)
 		return
 	}
@@ -119,7 +127,7 @@ func (p *mailProxy) handle(ctx context.Context, client net.Conn) {
 		// Tell the mail client why, where the protocol has a way to.
 		_ = client.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		switch {
-		case implicit:
+		case clientTLS:
 		case p.proto == "smtp":
 			_, _ = io.WriteString(client, "421 4.3.2 Not ready: no Proton account is signed in\r\n")
 		default:
@@ -136,9 +144,14 @@ func (p *mailProxy) handle(ctx context.Context, client net.Conn) {
 	defer stop()
 
 	var tlsClient, tlsUp *tls.Conn
-	if implicit {
+	switch {
+	case implicit && clientTLS:
 		tlsClient, tlsUp, err = p.secure(client, up)
-	} else {
+	case implicit:
+		tlsClient, tlsUp, err = p.startTLSForClient(client, up)
+	case clientTLS:
+		tlsClient, tlsUp, err = p.tlsFirst(client, up)
+	default:
 		_ = client.SetDeadline(time.Now().Add(mailPreTLSTimeout))
 		_ = up.SetDeadline(time.Now().Add(mailPreTLSTimeout))
 		switch p.proto {
@@ -151,6 +164,9 @@ func (p *mailProxy) handle(ctx context.Context, client net.Conn) {
 	if err != nil {
 		if !errors.Is(err, io.EOF) && ctx.Err() == nil {
 			log.Printf("%s: session from %s ended before encryption started: %v", p.name, client.RemoteAddr(), err)
+			if how, rejected := certTurnedDown(err.Error()); rejected && p.trouble != nil {
+				p.trouble(p.name, remoteHost(client.RemoteAddr()), how)
+			}
 		}
 		return
 	}
@@ -193,6 +209,202 @@ func (p *mailProxy) secure(client, up net.Conn) (*tls.Conn, *tls.Conn, error) {
 		p.forgetPinned()
 		return nil, nil, fmt.Errorf("TLS with bridge: %w", err)
 	}
+	tlsClient := tls.Server(client, p.certs.TLSConfig())
+	if err := tlsClient.Handshake(); err != nil {
+		return nil, nil, fmt.Errorf("TLS with the mail client: %w", err)
+	}
+	return tlsClient, tlsUp, nil
+}
+
+// tlsFirst serves a client that starts TLS from the first byte while bridge
+// expects STARTTLS: the proxy asks bridge for STARTTLS itself, and then hands
+// the client the greeting it has been waiting for.
+func (p *mailProxy) tlsFirst(client, up net.Conn) (*tls.Conn, *tls.Conn, error) {
+	_ = up.SetDeadline(time.Now().Add(mailHandshakeTimeout))
+	ur := bufio.NewReaderSize(up, mailMaxLine)
+
+	var greeting string
+	switch p.proto {
+	case "smtp":
+		code, text, err := smtpReply(ur)
+		if err != nil {
+			return nil, nil, err
+		}
+		if code != "220" {
+			return nil, nil, fmt.Errorf("bridge is not ready: %s", strings.TrimSpace(text))
+		}
+		greeting = text
+		for _, step := range []struct{ command, want string }{{"EHLO mailbridge\r\n", "250"}, {"STARTTLS\r\n", "220"}} {
+			if _, err := io.WriteString(up, step.command); err != nil {
+				return nil, nil, err
+			}
+			code, text, err := smtpReply(ur)
+			if err != nil {
+				return nil, nil, err
+			}
+			if code != step.want {
+				return nil, nil, fmt.Errorf("bridge refused %s: %s", strings.TrimSpace(step.command), strings.TrimSpace(text))
+			}
+		}
+	default:
+		line, err := readLine(ur)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !strings.HasPrefix(strings.ToUpper(line), "* OK") {
+			return nil, nil, fmt.Errorf("bridge is not ready: %s", strings.TrimSpace(line))
+		}
+		// Bridge's own greeting may list what it can do before TLS, which
+		// no longer holds. The client asks again when it wants to know.
+		greeting = "* OK IMAP4rev1 Service Ready\r\n"
+		const tag = "mailbridge1"
+		if _, err := io.WriteString(up, tag+" STARTTLS\r\n"); err != nil {
+			return nil, nil, err
+		}
+		for {
+			line, err := readLine(ur)
+			if err != nil {
+				return nil, nil, err
+			}
+			if rest, tagged := strings.CutPrefix(line, tag+" "); tagged {
+				if !strings.HasPrefix(strings.ToUpper(rest), "OK") {
+					return nil, nil, fmt.Errorf("bridge refused STARTTLS: %s", strings.TrimSpace(rest))
+				}
+				break
+			}
+		}
+	}
+	if ur.Buffered() > 0 {
+		return nil, nil, errors.New("bridge sent data after agreeing to STARTTLS")
+	}
+
+	tlsClient, tlsUp, err := p.secure(client, up)
+	if err != nil {
+		return nil, nil, err
+	}
+	if _, err := io.WriteString(tlsClient, greeting); err != nil {
+		return nil, nil, err
+	}
+	return tlsClient, tlsUp, nil
+}
+
+// startTLSForClient serves a client that asks for STARTTLS while bridge
+// expects TLS from the first byte. TLS with bridge comes first, and bridge's
+// greeting with it. Then the proxy itself plays the unencrypted opening of
+// the session, in which a client can do nothing but ask for STARTTLS.
+func (p *mailProxy) startTLSForClient(client, up net.Conn) (*tls.Conn, *tls.Conn, error) {
+	cfg, err := p.upstreamTLS()
+	if err != nil {
+		return nil, nil, err
+	}
+	_ = up.SetDeadline(time.Now().Add(mailHandshakeTimeout))
+	tlsUp := tls.Client(up, cfg)
+	if err := tlsUp.Handshake(); err != nil {
+		p.forgetPinned()
+		return nil, nil, fmt.Errorf("TLS with bridge: %w", err)
+	}
+	// The client gets a greeting from here, so bridge's has to go. It is
+	// read byte by byte: nothing that follows may be swallowed with it.
+	ur := bufio.NewReaderSize(tlsUp, mailMaxLine)
+	if p.proto == "smtp" {
+		code, text, err := smtpReply(ur)
+		if err != nil {
+			return nil, nil, err
+		}
+		if code != "220" {
+			return nil, nil, fmt.Errorf("bridge is not ready: %s", strings.TrimSpace(text))
+		}
+	} else {
+		line, err := readLine(ur)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !strings.HasPrefix(strings.ToUpper(line), "* OK") {
+			return nil, nil, fmt.Errorf("bridge is not ready: %s", strings.TrimSpace(line))
+		}
+	}
+	if ur.Buffered() > 0 {
+		return nil, nil, errors.New("bridge sent more than a greeting")
+	}
+
+	_ = client.SetDeadline(time.Now().Add(mailPreTLSTimeout))
+	_ = up.SetDeadline(time.Now().Add(mailPreTLSTimeout))
+	cr := bufio.NewReaderSize(client, mailMaxLine)
+	say := func(format string, args ...any) error {
+		_, err := fmt.Fprintf(client, format, args...)
+		return err
+	}
+	goAhead := ""
+	if p.proto == "smtp" {
+		err = say("220 mailbridge ESMTP Service Ready\r\n")
+		for err == nil && goAhead == "" {
+			var line string
+			if line, err = readLine(cr); err != nil {
+				break
+			}
+			verb, _, _ := strings.Cut(strings.ToUpper(strings.TrimSpace(line)), " ")
+			switch verb {
+			case "EHLO":
+				err = say("250-mailbridge\r\n250 STARTTLS\r\n")
+			case "HELO":
+				err = say("250 mailbridge\r\n")
+			case "NOOP", "RSET":
+				err = say("250 2.0.0 OK\r\n")
+			case "QUIT":
+				_ = say("221 2.0.0 Bye\r\n")
+				return nil, nil, nil
+			case "STARTTLS":
+				goAhead = "220 2.0.0 Ready to start TLS\r\n"
+			default:
+				err = say("530 5.7.0 Must issue a STARTTLS command first\r\n")
+			}
+		}
+	} else {
+		const capability = "CAPABILITY IMAP4rev1 STARTTLS LOGINDISABLED"
+		err = say("* OK [%s] Service Ready\r\n", capability)
+		for err == nil && goAhead == "" {
+			var line string
+			if line, err = readLine(cr); err != nil {
+				break
+			}
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				err = say("* BAD Invalid command\r\n")
+				continue
+			}
+			tag, verb := fields[0], strings.ToUpper(fields[1])
+			switch {
+			case strings.HasSuffix(strings.TrimSpace(line), "}"):
+				_ = say("%s BAD Use STARTTLS first\r\n", tag)
+				return nil, nil, errors.New("literal before STARTTLS")
+			case verb == "CAPABILITY":
+				err = say("* %s\r\n%s OK CAPABILITY completed\r\n", capability, tag)
+			case verb == "NOOP":
+				err = say("%s OK NOOP completed\r\n", tag)
+			case verb == "ID":
+				err = say("* ID NIL\r\n%s OK ID completed\r\n", tag)
+			case verb == "LOGOUT":
+				_ = say("* BYE Logging out\r\n%s OK LOGOUT completed\r\n", tag)
+				return nil, nil, nil
+			case verb == "STARTTLS":
+				goAhead = tag + " OK Begin TLS negotiation now\r\n"
+			default:
+				err = say("%s NO [PRIVACYREQUIRED] Use STARTTLS first\r\n", tag)
+			}
+		}
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	// Anything sent along with the command would otherwise be read as if it
+	// had arrived encrypted.
+	if cr.Buffered() > 0 {
+		return nil, nil, errors.New("data after STARTTLS")
+	}
+	if _, err := io.WriteString(client, goAhead); err != nil {
+		return nil, nil, err
+	}
+	_ = client.SetDeadline(time.Now().Add(mailHandshakeTimeout))
 	tlsClient := tls.Server(client, p.certs.TLSConfig())
 	if err := tlsClient.Handshake(); err != nil {
 		return nil, nil, fmt.Errorf("TLS with the mail client: %w", err)
