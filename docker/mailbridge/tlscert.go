@@ -91,6 +91,23 @@ func (s *CertStore) Fallback() error {
 // be expected to accept without asking: anything but the self-signed one.
 func (s *CertStore) Trusted() bool { return s.Info().Origin != certSelfSigned }
 
+// Covers says whether the certificate in use is good for name.
+func (s *CertStore) Covers(name string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.cert == nil || len(s.cert.Certificate) == 0 {
+		return false
+	}
+	leaf := s.cert.Leaf
+	if leaf == nil {
+		var err error
+		if leaf, err = x509.ParseCertificate(s.cert.Certificate[0]); err != nil {
+			return false
+		}
+	}
+	return leaf.VerifyHostname(name) == nil
+}
+
 // Hostname is the first name of a trusted certificate that a mail client can
 // connect by, or empty.
 func (s *CertStore) Hostname() string {

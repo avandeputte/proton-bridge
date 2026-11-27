@@ -622,6 +622,14 @@ when that happens.
 - **Still a certificate warning with a trusted certificate.** The client is
   connecting by IP address or by another name than the certificate was issued
   for. Use the name on the Certificate card.
+- **The page says "unreachable" in a window that was open before the
+  certificate changed.** A browser accepts a self-signed certificate for the
+  one address and the one certificate you confirmed. Once the container has
+  a certificate from Let's Encrypt, a window still open at the old address is
+  refused by its own browser and keeps trying every few seconds. Close it and
+  open the page by a name on the certificate. The web UI shows a notice
+  naming the browser's address and the address it asked for, and the log has
+  a line `web UI: ...` about it every 15 minutes at most.
 - **A port set in the web UI cannot be opened.** Something else in the
   container's network uses it. With `network_mode: host` that includes
   everything else on the server, and ports below 1024 are usually off limits

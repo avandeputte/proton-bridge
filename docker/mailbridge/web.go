@@ -624,7 +624,7 @@ func serveWeb(ctx context.Context, s *server) error {
 	}()
 
 	if cfg.TLSMode == "on" {
-		srv.TLSConfig = s.certs.TLSConfig()
+		newWebTrouble(s.certs, s.public.URL, s.bridge.notify).watch(srv)
 		log.Printf("web UI listening on https://%s", ln.Addr())
 		err = srv.ServeTLS(ln, "", "")
 		if errors.Is(err, http.ErrServerClosed) {
