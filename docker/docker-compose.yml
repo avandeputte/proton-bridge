@@ -2,7 +2,8 @@
 #
 #   docker compose -f docker/docker-compose.yml up -d             # pulls the published image
 #   docker compose -f docker/docker-compose.yml up -d --build     # or builds it from this source tree
-#   docker compose -f docker/docker-compose.yml logs mailbridge   # shows the first-start web UI password
+#
+# Open the page right after the first start: it asks you to choose its password.
 
 services:
   mailbridge:
@@ -26,8 +27,8 @@ services:
       # Name or IP your mail clients use to reach this host. Optional: by default the
       # web UI shows whatever name you typed into the browser.
       # MAILBRIDGE_HOSTNAME: "nas.lan"
-      # Fixed web UI password. Optional: without it a random one is generated on first
-      # start, printed to the log, and can be changed in the web UI.
+      # Fixed web UI password. Optional: without it the page asks the first visitor to
+      # choose one, which can be changed in the web UI later.
       # MAILBRIDGE_PASSWORD: "change-me-please"
       # Dovecot mode: mail clients talk to a bundled Dovecot that is kept in two-way
       # sync with bridge. Adds fast full-text search and a complete IMAP server, and

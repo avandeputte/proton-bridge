@@ -14,13 +14,11 @@ docker run -d --name mailbridge --restart unless-stopped \
   -p 8080:8080 -p 143:143 -p 587:587 \
   -v mailbridge-data:/data \
   ghcr.io/avandeputte/proton-bridge:latest
-
-docker logs mailbridge 2>&1 | grep -A3 "random one"
 ```
 
-Then open `https://<your-server>:8080`, sign in with the password printed by
-the second command, and add your Proton account. The page then shows the
-server, port, username and password to enter in your mail client.
+Then open `https://<your-server>:8080`, choose a password for the page, and
+add your Proton account. The page then shows the server, port, username and
+password to enter in your mail client.
 
 **Full instructions, configuration and security notes: [docker/README.md](docker/README.md).**
 

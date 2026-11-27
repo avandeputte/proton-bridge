@@ -25,13 +25,29 @@
 
   <section id="view-signin" class="card narrow" hidden>
     <h2>Sign in</h2>
-    <p class="muted">Enter the web UI password. On first start it is printed in the container log.</p>
+    <p class="muted">Enter the password of this page.</p>
     <form id="signin-form">
       <label>Password
         <input type="password" id="signin-password" autocomplete="current-password" required autofocus>
       </label>
       <p class="error" id="signin-error" hidden></p>
       <button type="submit" class="primary">Sign in</button>
+    </form>
+  </section>
+
+  <section id="view-setup" class="card narrow" hidden>
+    <h2>Choose a password</h2>
+    <p class="muted">This page shows the passwords of your mail accounts, so it needs one of its own.
+      Choose it now. You sign in with it from here on.</p>
+    <form id="setup-form">
+      <label>Password (at least 10 characters)
+        <input type="password" id="setup-password" autocomplete="new-password" required minlength="10">
+      </label>
+      <label>The same password again
+        <input type="password" id="setup-repeat" autocomplete="new-password" required minlength="10">
+      </label>
+      <p class="error" id="setup-error" hidden></p>
+      <button type="submit" class="primary">Set password and continue</button>
     </form>
   </section>
 

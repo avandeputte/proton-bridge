@@ -22,12 +22,15 @@ const (
 
 // Auth guards the web UI. The UI reveals mail credentials and accepts the
 // Proton password, so nothing but the sign-in page is reachable without it.
+//
+// A new container has no password. The first thing the page asks for is one
+// to be chosen, and nothing else works until then.
 type Auth struct {
 	path  string // where the password hash is stored
 	fixed bool   // password comes from the environment and cannot be changed in the UI
 
 	mu        sync.Mutex
-	hash      []byte
+	hash      []byte // nil until a password was chosen
 	sessions  map[string]time.Time
 	failures  int
 	lockedTil time.Time
@@ -72,18 +75,8 @@ func NewAuth(cfg Config) (*Auth, error) {
 		return nil, err
 	}
 
-	// First start: generate a password and show it once in the container log.
-	password := randomToken(15)
-	if err := a.store(password); err != nil {
-		return nil, err
-	}
-	log.Print("==================================================================")
-	log.Print(" No web UI password is set. A random one was generated:")
-	log.Print("")
-	log.Printf("     %s", password)
-	log.Print("")
-	log.Print(" Sign in with it and change it under Settings. It is not shown again.")
-	log.Print("==================================================================")
+	// First start: whoever opens the page first chooses the password.
+	log.Print("no web UI password is set yet: open the page and choose one")
 	return a, nil
 }
 
@@ -110,8 +103,57 @@ func (a *Auth) store(password string) error {
 // ErrLocked is returned while sign-in is throttled after failed attempts.
 var ErrLocked = errors.New("too many failed attempts, wait a moment and try again")
 
+// ErrNoPassword is returned for a sign-in before a password was chosen.
+var ErrNoPassword = errors.New("choose a password for this page first")
+
+// ErrPasswordSet is returned when a password is chosen a second time.
+var ErrPasswordSet = errors.New("a password was already chosen for this page: sign in with it")
+
+var errShortPassword = errors.New("the password must be at least 10 characters long")
+
+// NeedsSetup reports whether the password has yet to be chosen.
+func (a *Auth) NeedsSetup() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.hash == nil
+}
+
+// Setup takes the password of a new container and signs the one who chose
+// it in. It works once.
+func (a *Auth) Setup(password string) (string, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.hash != nil {
+		return "", ErrPasswordSet
+	}
+	if len(password) < minPasswordLen {
+		return "", errShortPassword
+	}
+	if err := a.store(password); err != nil {
+		return "", err
+	}
+	return a.newSession(), nil
+}
+
+// newSession starts a session and forgets the ones that ran out. Callers hold a.mu.
+func (a *Auth) newSession() string {
+	now := time.Now()
+	for t, exp := range a.sessions {
+		if now.After(exp) {
+			delete(a.sessions, t)
+		}
+	}
+	token := randomToken(32)
+	a.sessions[token] = now.Add(sessionTTL)
+	return token
+}
+
 // check verifies a password, throttling repeated failures. Callers hold a.mu.
 func (a *Auth) check(password string) error {
+	if a.hash == nil {
+		return ErrNoPassword
+	}
 	if time.Now().Before(a.lockedTil) {
 		return ErrLocked
 	}
@@ -136,17 +178,7 @@ func (a *Auth) Login(password string) (string, error) {
 	if err := a.check(password); err != nil {
 		return "", err
 	}
-
-	now := time.Now()
-	for t, exp := range a.sessions {
-		if now.After(exp) {
-			delete(a.sessions, t)
-		}
-	}
-
-	token := randomToken(32)
-	a.sessions[token] = now.Add(sessionTTL)
-	return token, nil
+	return a.newSession(), nil
 }
 
 // Valid reports whether token is a live session.
@@ -188,7 +220,7 @@ func (a *Auth) Change(keepToken, current, next string) error {
 		return errors.New("the password is set through the container environment and cannot be changed here")
 	}
 	if len(next) < minPasswordLen {
-		return errors.New("the new password must be at least 10 characters long")
+		return errShortPassword
 	}
 	if err := a.check(current); err != nil {
 		if errors.Is(err, ErrLocked) {

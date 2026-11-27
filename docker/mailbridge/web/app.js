@@ -45,6 +45,8 @@ async function api(method, path, body) {
   }
   let data = {};
   try { data = await res.json(); } catch (e) { /* empty body */ }
+  // A new container has no password yet: the page asks for one to be chosen.
+  if (res.status === 401) needsSetup = data.setup === true;
   if (!res.ok) throw new HttpError(res.status, data.error || ('Request failed (' + res.status + ')'));
   return data;
 }
@@ -102,9 +104,10 @@ let pollTimer = null;
 const revealed = new Set();   // account ids whose bridge password is visible
 let rendered = {};            // last rendered JSON per section, to avoid needless re-renders
 let logsOpen = false;
+let needsSetup = false;       // no password was chosen for this page yet
 
 function show(view) {
-  for (const v of ['view-loading', 'view-signin', 'view-app']) $(v).hidden = v !== view;
+  for (const v of ['view-loading', 'view-signin', 'view-setup', 'view-app']) $(v).hidden = v !== view;
   $('top-right').hidden = view !== 'view-app';
 }
 
@@ -113,6 +116,13 @@ function showSignIn() {
   state = null;
   rendered = {};
   revealed.clear();
+  if (needsSetup) {
+    if (!$('view-setup').hidden) return;
+    show('view-setup');
+    $('setup-password').focus();
+    return;
+  }
+  if (!$('view-signin').hidden) return;
   show('view-signin');
   $('signin-password').focus();
 }
@@ -724,8 +734,34 @@ $('signin-form').addEventListener('submit', async (e) => {
     $('signin-password').value = '';
     await refresh();
   } catch (ex) {
+    if (needsSetup) { showSignIn(); return; }
     err.textContent = ex.message;
     err.hidden = false;
+  }
+});
+
+$('setup-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const err = $('setup-error');
+  const fail = (msg) => { err.textContent = msg; err.hidden = false; };
+  err.hidden = true;
+  if ($('setup-password').value !== $('setup-repeat').value) {
+    fail('The two passwords are not the same.');
+    return;
+  }
+  try {
+    await api('POST', 'api/setup', { password: $('setup-password').value });
+    needsSetup = false;
+    e.target.reset();
+    await refresh();
+  } catch (ex) {
+    if (ex.status !== 409) { fail(ex.message); return; }
+    // Somebody else was first: the password is theirs to know.
+    e.target.reset();
+    needsSetup = false;
+    showSignIn();
+    $('signin-error').textContent = ex.message;
+    $('signin-error').hidden = false;
   }
 });
 

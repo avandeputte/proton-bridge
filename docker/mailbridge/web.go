@@ -96,6 +96,11 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
+// writeSetupNeeded tells the page to ask for a password to be chosen.
+func writeSetupNeeded(w http.ResponseWriter) {
+	writeJSON(w, http.StatusUnauthorized, map[string]any{"error": ErrNoPassword.Error(), "setup": true})
+}
+
 func writeResult(w http.ResponseWriter, err error) {
 	switch {
 	case err == nil:
@@ -147,6 +152,10 @@ func (s *server) api(authenticated bool, fn http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		if authenticated && !s.auth.Valid(sessionToken(r)) {
+			if s.auth.NeedsSetup() {
+				writeSetupNeeded(w)
+				return
+			}
 			writeError(w, http.StatusUnauthorized, "sign in required")
 			return
 		}
@@ -222,6 +231,10 @@ func (s *server) routes() http.Handler {
 			return
 		}
 		token, err := s.auth.Login(req.Password)
+		if errors.Is(err, ErrNoPassword) {
+			writeSetupNeeded(w)
+			return
+		}
 		if err != nil {
 			status := http.StatusUnauthorized
 			if errors.Is(err, ErrLocked) {
@@ -231,6 +244,28 @@ func (s *server) routes() http.Handler {
 			writeError(w, status, err.Error())
 			return
 		}
+		s.setCookie(w, r, token, int(sessionTTL.Seconds()))
+		writeResult(w, nil)
+	}))
+
+	// Works once, for a container that has no password yet.
+	mux.HandleFunc("POST /api/setup", s.api(false, func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Password string `json:"password"`
+		}
+		if !readJSON(w, r, &req) {
+			return
+		}
+		token, err := s.auth.Setup(req.Password)
+		switch {
+		case errors.Is(err, ErrPasswordSet):
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		case err != nil:
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		log.Printf("the web UI password was chosen from %s", s.clientAddr(r))
 		s.setCookie(w, r, token, int(sessionTTL.Seconds()))
 		writeResult(w, nil)
 	}))
