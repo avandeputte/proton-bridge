@@ -689,3 +689,97 @@ func TestWebProfileAndPorts(t *testing.T) {
 		}
 	}
 }
+
+// A new container has no password: the first visitor chooses it, once.
+func TestFirstVisitChoosesPassword(t *testing.T) {
+	w := newWebTest(t, Config{TLSMode: "off"})
+	dir := t.TempDir()
+	auth, err := NewAuth(Config{DataDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.s.auth = auth
+	w.handler = w.s.routes()
+
+	body := func(res *http.Response) string {
+		data, _ := io.ReadAll(res.Body)
+		return strings.TrimSpace(string(data))
+	}
+	if _, err := os.Stat(filepath.Join(dir, "webui.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a password file before anybody chose a password: %v", err)
+	}
+
+	// Nothing is served but the news that a password is wanted.
+	for _, target := range []string{"/api/state", "/api/logs", "/api/acme"} {
+		if res := w.do("GET", target, ""); res.StatusCode != http.StatusUnauthorized || !strings.Contains(body(res), `"setup":true`) {
+			t.Fatalf("GET %s without a password: %s", target, res.Status)
+		}
+	}
+	if res := w.do("POST", "/api/session", `{"password":""}`); res.StatusCode != http.StatusUnauthorized || !strings.Contains(body(res), `"setup":true`) {
+		t.Fatalf("signing in with no password: %s", res.Status)
+	}
+	if res := w.do("POST", "/api/session", `{"password":"correct horse battery"}`); res.StatusCode != http.StatusUnauthorized || len(res.Cookies()) != 0 {
+		t.Fatalf("signing in before a password exists: %s", res.Status)
+	}
+
+	// A password that is too short, and one without the header a page sends.
+	if res := w.do("POST", "/api/setup", `{"password":"short"}`); res.StatusCode != http.StatusBadRequest || !strings.Contains(body(res), "10 characters") {
+		t.Fatalf("a short password: %s", res.Status)
+	}
+	req := httptest.NewRequest("POST", "/api/setup", strings.NewReader(`{"password":"from another site 1"}`))
+	rec := httptest.NewRecorder()
+	w.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden || !auth.NeedsSetup() {
+		t.Fatalf("a request from another site chose the password: %d", rec.Code)
+	}
+
+	res := w.do("POST", "/api/setup", `{"password":"my own password"}`, csrfHeader, "/")
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("choosing a password: %s %s", res.Status, body(res))
+	}
+	for _, c := range res.Cookies() {
+		if c.Name == sessionCookie {
+			w.cookie = c
+		}
+	}
+	if w.cookie == nil || !w.cookie.HttpOnly {
+		t.Fatalf("no session after choosing a password: %v", res.Cookies())
+	}
+	if res := w.do("GET", "/api/state", ""); res.StatusCode != http.StatusOK {
+		t.Fatalf("the page after choosing a password: %s", res.Status)
+	}
+	if fi, err := os.Stat(filepath.Join(dir, "webui.json")); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("the password file: %v, %v", fi, err)
+	}
+
+	// It cannot be chosen again, with or without a session.
+	if res := w.do("POST", "/api/setup", `{"password":"somebody else's"}`); res.StatusCode != http.StatusConflict {
+		t.Fatalf("choosing a password twice: %s", res.Status)
+	}
+	w.cookie = nil
+	if res := w.do("POST", "/api/setup", `{"password":"somebody else's"}`); res.StatusCode != http.StatusConflict {
+		t.Fatalf("choosing a password twice: %s", res.Status)
+	}
+	if res := w.do("GET", "/api/state", ""); res.StatusCode != http.StatusUnauthorized || strings.Contains(body(res), "setup") {
+		t.Fatalf("signed out after the password was chosen: %s", res.Status)
+	}
+	if res := w.do("POST", "/api/session", `{"password":"my own password"}`); res.StatusCode != http.StatusOK {
+		t.Fatalf("signing in with the chosen password: %s", res.Status)
+	}
+
+	// It is kept across a restart, and a password from the environment leaves nothing to choose.
+	again, err := NewAuth(Config{DataDir: dir})
+	if err != nil || again.NeedsSetup() {
+		t.Fatalf("after a restart: needs setup %v, %v", again.NeedsSetup(), err)
+	}
+	if _, err := again.Login("my own password"); err != nil {
+		t.Fatalf("signing in after a restart: %v", err)
+	}
+	fixed, err := NewAuth(Config{DataDir: t.TempDir(), Password: "from the environment"})
+	if err != nil || fixed.NeedsSetup() {
+		t.Fatalf("with MAILBRIDGE_PASSWORD: needs setup %v, %v", fixed.NeedsSetup(), err)
+	}
+	if _, err := fixed.Setup("my own password"); !errors.Is(err, ErrPasswordSet) {
+		t.Fatalf("choosing a password over the one from the environment: %v", err)
+	}
+}

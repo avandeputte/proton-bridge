@@ -37,11 +37,10 @@ volumes:
   mailbridge-data:
 ```
 
-Then start it and read the web UI password that is generated on first start:
+Then start it:
 
 ```sh
 docker compose up -d
-docker compose logs mailbridge | grep -A3 "random one"
 ```
 
 [docker-compose.yml](docker-compose.yml) in this directory is the same thing
@@ -52,7 +51,9 @@ takes a few minutes.
 
 1. Open `https://<your-server>:8080`. The certificate is self-signed, so the
    browser warns once; accept it.
-2. Sign in with the generated password and change it under **Web UI password**.
+2. Choose a password for the page. A new container has none, and the page
+   asks for one before it shows anything else. Do this right after the first
+   start: until then, whoever opens the page first chooses it.
 3. Under **Add a Proton account**, sign in with your Proton email and password.
    The page asks for the two-factor code and the mailbox password if your
    account uses them. Bridge needs a paid Proton plan.
@@ -491,7 +492,7 @@ in the web UI, which keeps them in the volume.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MAILBRIDGE_PASSWORD` | generated | Fixed web UI password. When set it cannot be changed from the page. |
+| `MAILBRIDGE_PASSWORD` | chosen on the first visit | Fixed web UI password. When set, the page does not ask for one to be chosen and it cannot be changed from the page. |
 | `MAILBRIDGE_PASSWORD_FILE` | | Same, read from a file (Docker secrets). |
 | `MAILBRIDGE_HOSTNAME` | automatic | Server name shown in the mail client settings and written into profiles. Left out, it is the first name on a trusted certificate, else the host of the public URL, else the name your browser used. *Mail server name* in the web UI wins. |
 | `MAILBRIDGE_PUBLIC_URL` | | Address of the web UI [behind a reverse proxy](#behind-a-reverse-proxy), such as `https://example.com/mailbridge`. *Address of this page* in the web UI wins. |
@@ -546,6 +547,11 @@ Treat this container like the mail account itself.
 - **The web UI is password protected** because it shows the bridge passwords
   and accepts your Proton password. Sign-in attempts are throttled, sessions
   expire after 12 hours, and the page is served over HTTPS by default.
+- **The first visitor chooses that password.** A new container serves nothing
+  but the form to choose it, and the log says from which address it was
+  chosen. Open the page right after the first start, or set
+  `MAILBRIDGE_PASSWORD` if the container starts where others can reach it
+  before you do.
 - **Keep it on the LAN.** Do not publish ports 8080, 143, 993 or 587 to the
   internet, and think twice before putting a reverse proxy that faces the
   internet in front of them: the web UI password is then all that stands
@@ -596,8 +602,9 @@ when that happens.
   Complete it in the tab that opens, then press *I completed the
   verification*.
 - **Lost the web UI password.** Delete `webui.json` from the volume and
-  restart; a new one is printed in the log:
-  `docker compose exec mailbridge rm /data/mailbridge/webui.json`
+  restart. The page then asks for a new one to be chosen, so open it right
+  away:
+  `docker compose exec mailbridge rm /data/mailbridge/webui.json && docker compose restart mailbridge`
 - **Something is stuck.** *Show bridge log* in the web UI, or
   `docker compose logs -f mailbridge`.
 - **Dovecot copy says "problem".** The line below it is what the sync
